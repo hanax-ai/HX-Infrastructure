@@ -1,0 +1,7 @@
+---
+- name: Enforce PostgreSQL auth policy (SOP-PG-AUTH-01)
+  hosts: hx-postgres-server.dev-test.hana-x.ai
+  gather_facts: true
+  become: true
+  roles:
+    - hx_pg_auth

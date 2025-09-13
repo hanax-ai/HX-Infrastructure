@@ -1,0 +1,97 @@
+---
+# ===================================================================
+# Play 1: Fleet certificate expiration checks
+# ===================================================================
+- name: HX Infrastructure | Certificate Expiration Checks
+  hosts: all
+  gather_facts: yes
+  tags:
+    - medium
+    - cert_expiry
+
+  vars:
+    # Add more certs/hosts here as needed
+    cert_targets:
+      - { host: "hx-vectordb-server", path: "/etc/qdrant/certs/qdrant.crt" }
+
+  tasks:
+    - name: "Certs | Gather info for specified certificates"
+      community.crypto.x509_certificate_info:
+        path: "{{ item.path }}"
+      loop: "{{ cert_targets }}"
+      when: inventory_hostname_short == item.host
+      register: cert_info
+
+    # Convert ASN.1 not_after to epoch seconds so we can compare to now + 30d
+    - name: "Certs | Compute expiry epoch for each gathered cert"
+      ansible.builtin.set_fact:
+        _cert_results: "{{ cert_info.results | default([]) }}"
+        _now_epoch: "{{ ansible_date_time.epoch | int }}"
+      when: cert_info is defined
+
+    - name: "Certs | Assert certificates are not expiring in the next 30 days"
+      vars:
+        _not_after_asn1: "{{ item.not_after | default(item.enddate) | default('') }}"
+        _expiry_epoch: "{{ (_not_after_asn1 | ansible.utils.to_datetime('%Y%m%d%H%M%SZ', errors='ignore') | default(_not_after_asn1 | ansible.utils.to_datetime(errors='ignore')) ).strftime('%s') | int }}"
+        _threshold_epoch: "{{ _now_epoch + 2592000 }}"  # 30 days
+      ansible.builtin.assert:
+        that:
+          - _not_after_asn1 | length > 0
+          - _expiry_epoch > _threshold_epoch
+        success_msg: "Certificate {{ item.item.path }} on {{ item.item.host }} is valid for more than 30 days (expires at epoch {{ _expiry_epoch }})."
+        fail_msg: "ALERT: Certificate {{ item.item.path }} on {{ item.item.host }} expires in < 30 days (expiry epoch {{ _expiry_epoch }})."
+      loop: "{{ _cert_results | default([]) }}"
+      when:
+        - _cert_results is defined
+        - not item.skipped | default(false)
+
+# ===================================================================
+# Play 2: CA workspace health checks (hx-ca-server)
+# ===================================================================
+- name: HX Infrastructure | CA Workspace Health Checks
+  hosts: hx-ca-server.dev-test.hana-x.ai
+  gather_facts: yes
+  tags:
+    - medium
+    - ca_health
+
+  vars:
+    # Per SOP: strict perms on CA private key; world-readable cert/extension templates
+    ca_files_to_check:
+      - { path: "/root/ca/ca.key",        perms: "0400" }
+      - { path: "/root/ca/ca.crt",        perms: "0644" }
+      - { path: "/root/ca/v3_server.ext", perms: "0644" }
+      - { path: "/root/ca/v3_client.ext", perms: "0644" }
+
+  tasks:
+    - name: "CA Health | Check that critical files exist and have correct permissions"
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      loop: "{{ ca_files_to_check }}"
+      register: ca_file_stats
+
+    - name: "CA Health | Assert file states"
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.mode == item.item.perms
+        success_msg: "File {{ item.item.path }} exists with correct permissions ({{ item.item.perms }})."
+        fail_msg: "ALERT: {{ item.item.path }} missing or incorrect permissions (found={{ item.stat.mode | default('absent') }}, expected={{ item.item.perms }})."
+      loop: "{{ ca_file_stats.results }}"
+
+    # Compute root filesystem free/total in a safe, readable way
+    - name: "CA Health | Extract root (/) mount facts"
+      ansible.builtin.set_fact:
+        _root_mount: "{{ (ansible_mounts | selectattr('mount','equalto','/') | list | first) | default({}) }}"
+
+    - name: "CA Health | Assert that root filesystem has >20% free space"
+      vars:
+        _free:  "{{ _root_mount.size_available | default(0) | int }}"
+        _total: "{{ _root_mount.size_total     | default(1) | int }}"
+        _ratio: "{{ (_free / _total) | float }}"
+      ansible.builtin.assert:
+        that:
+          - _total > 0
+          - _ratio > 0.20
+        success_msg: "Root filesystem free={{ (_ratio*100) | round(1) }}% (OK: >20%)."
+        fail_msg: "ALERT: Root filesystem free={{ (_ratio*100) | round(1) }}% (too low; <=20%)."

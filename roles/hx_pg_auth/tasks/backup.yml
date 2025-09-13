@@ -1,0 +1,43 @@
+---
+- name: Ensure backup directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ hx_pg_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Stat pg_hba.conf
+  become: true
+  ansible.builtin.stat:
+    path: "{{ hx_pg_hba_path }}"
+  register: hba_stat
+
+- name: Backup pg_hba.conf (pre-change)
+  when: hba_stat.stat.exists
+  become: true
+  ansible.builtin.copy:
+    src: "{{ hx_pg_hba_path }}"
+    dest: "{{ hx_pg_backup_dir }}/pg_hba.conf.{{ hx_pg_backup_ts }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Stat postgresql.conf
+  become: true
+  ansible.builtin.stat:
+    path: "{{ hx_pg_conf_path }}"
+  register: conf_stat
+
+- name: Backup postgresql.conf (pre-change)
+  when: conf_stat.stat.exists
+  become: true
+  ansible.builtin.copy:
+    src: "{{ hx_pg_conf_path }}"
+    dest: "{{ hx_pg_backup_dir }}/postgresql.conf.{{ hx_pg_backup_ts }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0640"

@@ -1,0 +1,100 @@
+---
+- name: Ensure pg_hba.conf from template
+  become: true
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ hx_pg_hba_path }}"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: reload pg config
+
+- name: Ensure password_encryption = scram-sha-256
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ hx_pg_conf_path }}"
+    regexp: '^\s*#?\s*password_encryption\s*='
+    line: "password_encryption = 'scram-sha-256'"
+    backrefs: false
+  notify: reload pg config
+
+- name: Ensure SSL is enabled
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ hx_pg_conf_path }}"
+    regexp: '^\s*#?\s*ssl\s*='
+    line: "ssl = on"
+    backrefs: false
+  notify: reload pg config
+
+- name: Optionally enforce TLS floor
+  when: hx_pg_enforce_tls_floor | bool
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ hx_pg_conf_path }}"
+    regexp: '^\s*#?\s*ssl_min_protocol_version\s*='
+    line: "ssl_min_protocol_version = 'TLSv1.2'"
+    backrefs: false
+  notify: reload pg config
+
+# --- Wait for any pending reloads to apply before validating ---
+- name: Flush handlers (apply reload now)
+  ansible.builtin.meta: flush_handlers
+
+- name: Validate HBA parse (should return 0 rows)
+  become: true
+  become_user: postgres
+  ansible.builtin.command: >
+    psql -c "SELECT type,database,user_name,address,auth_method,error
+             FROM pg_hba_file_rules WHERE error IS NOT NULL;"
+  register: hba_validate
+  changed_when: false
+
+- name: Fail if HBA has parse errors
+  ansible.builtin.fail:
+    msg: "pg_hba.conf has parse errors:\n{{ hba_validate.stdout }}"
+  when: hba_validate.stdout is search('rows\)\n') and (hba_validate.stdout | regex_search('\n\(\d+ rows\)')) and (hba_validate.stdout | regex_search('\n\(0 rows\)') is not defined)
+
+# ---- Set app password only if current login fails with provided secret ----
+- name: Skip password operations if no secret provided
+  ansible.builtin.debug:
+    msg: "No hx_pg_app_password provided; skipping password path verification."
+  when: hx_pg_app_password | length == 0
+
+- name: Try password login with provided secret (expect success)
+  when: hx_pg_app_password | length > 0
+  become: true
+  ansible.builtin.shell: |
+    set -euo pipefail
+    PGPASSWORD='{{ hx_pg_app_password }}' psql \
+      "host={{ inventory_hostname }} dbname={{ hx_pg_db }} user={{ hx_pg_app_user }} \
+       sslmode=verify-full sslrootcert={{ hx_pg_ca_path }} gssencmode=disable" \
+      -c '\q'
+  register: pw_login_try
+  changed_when: false
+  failed_when: false
+  no_log: true  # hides the DSN with secret
+
+- name: Set/Reset app password (only if login failed)
+  when:
+    - hx_pg_app_password | length > 0
+    - pw_login_try.rc != 0
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -v p='{{ hx_pg_app_password | replace("'", "''") }}' -c "ALTER ROLE {{ hx_pg_app_user }} WITH LOGIN PASSWORD :'p';"
+  no_log: true
+  notify: reload pg config
+
+- name: Re-test password login after change (must succeed)
+  when: hx_pg_app_password | length > 0
+  become: true
+  ansible.builtin.shell: |
+    set -euo pipefail
+    PGPASSWORD='{{ hx_pg_app_password }}' psql \
+      "host={{ inventory_hostname }} dbname={{ hx_pg_db }} user={{ hx_pg_app_user }} \
+       sslmode=verify-full sslrootcert={{ hx_pg_ca_path }} gssencmode=disable" \
+      -c '\q'
+  changed_when: false
+  no_log: true

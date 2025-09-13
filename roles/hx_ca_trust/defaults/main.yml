@@ -1,0 +1,18 @@
+# Where to fetch the root CA from (on the CA host)
+hx_ca_host: "hx-ca-server.dev-test.hana-x.ai"
+hx_root_ca_path_on_ca: "/home/agent0/easy-rsa/pki/ca.crt"
+hx_root_ca_filename: "hx-rootCA.crt"
+
+# Domain Controller host for verification
+hx_dc_host: "hx-dc-server.dev-test.hana-x.ai"
+
+# Optional supply-chain guard: expected SHA256 fingerprint of the CA cert
+# Format: "SHA256:AA:BB:...". Leave empty to skip the check.
+hx_expected_ca_sha256: ""
+
+# Per-service verification targets
+# Each item: { name, address, port, servername?, health_url? }
+san_check_targets: []
+
+# Where to write the verification report on the DC
+hx_dc_report_dir: "/var/log/hx"

@@ -1,0 +1,6 @@
+---
+- name: Install HX root CA & verify services
+  hosts: all
+  gather_facts: yes
+  roles:
+    - hx_ca_trust

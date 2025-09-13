@@ -1,0 +1,55 @@
+---
+- name: HX Infrastructure | Critical Validation Checks
+  hosts: all
+  gather_facts: no
+  tags:
+    - critical
+  vars:
+    inventory_hostname_short: "{{ inventory_hostname.split('.')[0] }}"
+    host_ip: "{{ ip_map[inventory_hostname_short].split('/')[0] }}"
+
+  tasks:
+    - name: "DNS | Validate A record"
+      ansible.builtin.assert:
+        that:
+          - "host_ip in lookup('dig', inventory_hostname + '/A')"
+        success_msg: "A record for {{ inventory_hostname }} is correct."
+        fail_msg: "A record for {{ inventory_hostname }} is missing or incorrect."
+
+    - name: "DNS | Validate PTR record"
+      ansible.builtin.assert:
+        that:
+          - "inventory_hostname + '.' in lookup('dig', host_ip + '/PTR')"
+        success_msg: "PTR record for {{ host_ip }} is correct."
+        fail_msg: "PTR record for {{ host_ip }} is missing or incorrect."
+
+    - name: "Connectivity | Verify essential ports are reachable"
+      ansible.builtin.wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        state: started
+        timeout: 5
+      loop:
+        - { host: 'hx-dc-server.dev-test.hana-x.ai', port: 53 }
+        - { host: 'hx-vectordb-server.dev-test.hana-x.ai', port: 6333 }
+      delegate_to: localhost
+      run_once: true
+
+    - name: "TLS | Verify CA trust chain against a known-good service"
+      ansible.builtin.command: >
+        openssl s_client -connect hx-vectordb-server.dev-test.hana-x.ai:6333
+        -servername hx-vectordb-server.dev-test.hana-x.ai
+        -CAfile /etc/ssl/certs/ca-certificates.crt
+      args:
+        stdin: ""
+      changed_when: false
+      register: tls_check_result
+      run_once: true
+
+    - name: "TLS | Assert that verification was successful"
+      ansible.builtin.assert:
+        that:
+          - "'Verify return code: 0 (ok)' in tls_check_result.stdout"
+        success_msg: "TLS trust chain is validated."
+        fail_msg: "TLS trust chain validation FAILED."
+      run_once: true

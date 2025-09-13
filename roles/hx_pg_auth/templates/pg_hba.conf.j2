@@ -1,0 +1,21 @@
+# Managed by Ansible (hx_pg_auth)
+# Local admin via Unix socket
+local   all             postgres                                peer
+
+# Loopback (IPv4/IPv6) — enforce TLS + SCRAM
+hostssl all             all             127.0.0.1/32            scram-sha-256
+hostssl all             all             ::1/128                 scram-sha-256
+
+# LAN — {{ hx_pg_gss_user }} via GSSAPI (GSS-encrypted and TLS transports)
+hostgssenc all          {{ hx_pg_gss_user }}   {{ hx_pg_subnet }}   gss include_realm=0 krb_realm={{ hx_pg_realm }}
+hostssl   all           {{ hx_pg_gss_user }}   {{ hx_pg_subnet }}   gss include_realm=0 krb_realm={{ hx_pg_realm }}
+
+# LAN — {{ hx_pg_app_user }} to {{ hx_pg_db }} via SCRAM (both transports)
+hostgssenc {{ hx_pg_db }} {{ hx_pg_app_user }} {{ hx_pg_subnet }}   scram-sha-256
+hostssl   {{ hx_pg_db }} {{ hx_pg_app_user }} {{ hx_pg_subnet }}    scram-sha-256
+
+{% if hx_pg_hardening_reject_nossl %}
+# Explicitly reject non-TLS from anywhere (belt & suspenders)
+hostnossl all all 0.0.0.0/0 reject
+hostnossl all all ::0/0    reject
+{% endif %}

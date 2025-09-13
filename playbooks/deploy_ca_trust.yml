@@ -1,0 +1,6 @@
+---
+- name: Deploy HX Root CA to all hosts
+  hosts: all
+  become: yes
+  roles:
+    - hx_ca_trust

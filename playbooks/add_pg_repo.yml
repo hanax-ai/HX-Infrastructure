@@ -1,0 +1,50 @@
+# ~/hx-ansible/playbooks/add_pg_repo.yml
+---
+- name: Add PostgreSQL Official APT Repository
+  hosts: hx-devops-server.dev-test.hana-x.ai
+  gather_facts: true        # <— required because gathering=explicit
+  become: true
+
+  vars:
+    pgdg_key_path: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+
+  tasks:
+    - name: Ensure prerequisites
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Ensure PGDG key directory exists
+      file:
+        path: /usr/share/postgresql-common/pgdg
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download PostgreSQL APT GPG key (file-based, not apt-key)
+      get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: "{{ pgdg_key_path }}"
+        mode: "0644"
+        force: true
+
+    - name: Add PostgreSQL APT repository
+      apt_repository:
+        repo: "deb [signed-by={{ pgdg_key_path }}] https://apt.postgresql.org/pub/repos/apt {{ ansible_facts['distribution_release'] | default(ansible_facts['lsb']['codename']) }}-pgdg main"
+        filename: "pgdg"
+        state: present
+        update_cache: yes
+
+    - name: (Optional) Prove it’s live
+      command: apt-cache policy postgresql-17
+      register: pg_policy
+      changed_when: false
+
+    - debug:
+        var: pg_policy.stdout

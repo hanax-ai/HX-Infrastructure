@@ -1,0 +1,25 @@
+# ansible artifacts
+*.retry
+.logs/
+logs/
+.changed*
+.cache/
+.ansible/
+__pycache__/
+*.pyc
+
+# venvs / editors
+.venv/
+.env/
+*.swp
+*.swo
+.DS_Store
+
+# vault password files (keep secrets OUT of git)
+.vault_pass
+.vault_pass.txt
+vault.pass
+vault_pass.txt
+
+# local tmp
+tmp/

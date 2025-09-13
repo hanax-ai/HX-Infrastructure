@@ -1,0 +1,4 @@
+---
+- name: Update CA trust store
+  ansible.builtin.command: update-ca-certificates
+  listen: "Update CA trust store"

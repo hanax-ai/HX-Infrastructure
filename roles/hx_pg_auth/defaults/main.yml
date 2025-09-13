@@ -1,0 +1,27 @@
+hx_pg_cluster_version: 17
+hx_pg_cluster_name: main
+
+hx_pg_db: hx_app_db
+hx_pg_app_user: hx_app
+hx_pg_gss_user: agent0
+hx_pg_subnet: 192.168.10.0/24
+hx_pg_realm: DEV-TEST.HANA-X.AI
+
+# CA trust anchor path already deployed by hx_ca_trust role
+hx_pg_ca_path: /usr/local/share/ca-certificates/hx-root-ca.crt
+
+hx_pg_conf_dir: "/etc/postgresql/{{ hx_pg_cluster_version }}/{{ hx_pg_cluster_name }}"
+hx_pg_hba_path: "{{ hx_pg_conf_dir }}/pg_hba.conf"
+hx_pg_conf_path: "{{ hx_pg_conf_dir }}/postgresql.conf"
+hx_pg_keytab_path: "{{ hx_pg_conf_dir }}/postgres.keytab"
+
+# Hardening toggles
+hx_pg_hardening_reject_nossl: true
+hx_pg_enforce_tls_floor: true
+
+# App password (supply via vault: inventories/group_vars/all/vault.yml)
+hx_pg_app_password: ""
+
+# Backups
+hx_pg_backup_dir: /var/backups/hx/pg
+hx_pg_backup_ts: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"

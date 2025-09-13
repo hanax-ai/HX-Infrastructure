@@ -1,0 +1,137 @@
+---
+- name: Pre-change backups
+  ansible.builtin.import_tasks: backup.yml
+
+- name: Ensure pg_hba.conf from template
+  become: true
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ hx_pg_hba_path }}"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: reload pg config
+
+- name: Ensure password_encryption = scram-sha-256
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ hx_pg_conf_path }}"
+    regexp: '^\s*#?\s*password_encryption\s*='
+    line: "password_encryption = 'scram-sha-256'"
+  notify: reload pg config
+
+- name: Ensure SSL is enabled
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ hx_pg_conf_path }}"
+    regexp: '^\s*#?\s*ssl\s*='
+    line: "ssl = on"
+  notify: reload pg config
+
+- name: Optionally enforce TLS floor
+  when: hx_pg_enforce_tls_floor | bool
+  become: true
+  ansible.builtin.lineinfile:
+    path: "{{ hx_pg_conf_path }}"
+    regexp: '^\s*#?\s*ssl_min_protocol_version\s*='
+    line: "ssl_min_protocol_version = 'TLSv1.2'"
+  notify: reload pg config
+
+- name: Flush handlers (apply reload now)
+  ansible.builtin.meta: flush_handlers
+
+- name: Validate HBA parse (must be zero)
+  when: not ansible_check_mode
+  become: true
+  become_user: postgres
+  ansible.builtin.command: >
+    psql -tAc "SELECT COUNT(*) FROM pg_hba_file_rules WHERE error IS NOT NULL;"
+  register: hba_error_count
+  changed_when: false
+
+- name: Fail if HBA has parse errors
+  when:
+    - not ansible_check_mode
+    - (hba_error_count.stdout | trim) != '0'
+  ansible.builtin.fail:
+    msg: "pg_hba.conf has parse errors (count={{ hba_error_count.stdout | trim }})."
+
+# =========================
+# Password / role section
+# =========================
+
+- name: Skip password operations if no secret provided
+  when: hx_pg_app_password | length == 0
+  ansible.builtin.debug:
+    msg: "No hx_pg_app_password provided; skipping password path verification."
+
+- name: Check if app role exists
+  when: hx_pg_app_password | length > 0
+  become: true
+  become_user: postgres
+  ansible.builtin.command: >
+    psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ hx_pg_app_user }}'"
+  register: app_role_exists
+  changed_when: false
+  failed_when: false
+
+- name: Create app role if missing
+  when:
+    - hx_pg_app_password | length > 0
+    - app_role_exists.stdout | trim != '1'
+  become: true
+  become_user: postgres
+  ansible.builtin.command: >
+    psql -c "CREATE ROLE {{ hx_pg_app_user }} LOGIN"
+  changed_when: true
+
+- name: Try password login with provided secret (expect success)
+  when: hx_pg_app_password | length > 0
+  become: true
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    psql "host={{ inventory_hostname }} dbname={{ hx_pg_db }} user={{ hx_pg_app_user }} \
+          sslmode=verify-full sslrootcert={{ hx_pg_ca_path }} gssencmode=disable" \
+      -c '\q'
+  args:
+    executable: /bin/bash
+  environment:
+    PGPASSWORD: "{{ hx_pg_app_password }}"
+  register: pw_login_try
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Set/Reset app password (only if login failed)
+  when:
+    - hx_pg_app_password | length > 0
+    - pw_login_try.rc != 0
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    psql <<'SQL'
+    \set p {{ hx_pg_app_password | replace("'", "''") }}
+    ALTER ROLE {{ hx_pg_app_user }} WITH LOGIN PASSWORD :'p';
+    SQL
+  args:
+    executable: /bin/bash
+  no_log: true
+  notify: reload pg config
+
+- name: Re-test password login after change (must succeed)
+  when: hx_pg_app_password | length > 0
+  become: true
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    psql "host={{ inventory_hostname }} dbname={{ hx_pg_db }} user={{ hx_pg_app_user }} \
+          sslmode=verify-full sslrootcert={{ hx_pg_ca_path }} gssencmode=disable" \
+      -v VERBOSITY=terse -c '\conninfo'
+  args:
+    executable: /bin/bash
+  environment:
+    PGPASSWORD: "{{ hx_pg_app_password }}"
+  register: pw_login_retest
+  changed_when: false
+  failed_when: pw_login_retest.rc != 0
+  no_log: false

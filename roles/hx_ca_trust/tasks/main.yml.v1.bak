@@ -1,0 +1,86 @@
+---
+# 1) Slurp CA cert from the CA host (once)
+- name: "CA | Read root CA from {{ hx_ca_host }}"
+  ansible.builtin.slurp:
+    src: "{{ hx_root_ca_path_on_ca }}"
+  delegate_to: "{{ hx_ca_host }}"
+  run_once: true
+  register: hx_root_ca_slurped
+
+# 2) Install CA into each host's trust store
+- name: "Trust | Ensure destination directory exists (Debian/Ubuntu)"
+  become: yes
+  ansible.builtin.file:
+    path: "/usr/local/share/ca-certificates/hana-x"
+    state: directory
+    mode: "0755"
+  when: ansible_facts.os_family == "Debian"
+
+- name: "Trust | Ensure destination directory exists (RHEL/CentOS)"
+  become: yes
+  ansible.builtin.file:
+    path: "/etc/pki/ca-trust/source/anchors"
+    state: directory
+    mode: "0755"
+  when: ansible_facts.os_family == "RedHat"
+
+- name: "Trust | Install root CA to correct location"
+  become: yes
+  ansible.builtin.copy:
+    dest: >-
+      {{
+        (ansible_facts.os_family == 'Debian')
+          | ternary(
+              '/usr/local/share/ca-certificates/hana-x/' ~ hx_root_ca_filename,
+              '/etc/pki/ca-trust/source/anchors/' ~ hx_root_ca_filename
+            )
+      }}
+    content: "{{ hx_root_ca_slurped.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Update trust store
+
+# 3) Verify each service chain/SAN from the DC (system trust)
+- name: "Verify | From DC, check TLS chain & SAN for each service"
+  vars:
+    _servername: "{{ item.servername | default(item.address) }}"
+    _cmd: >-
+      openssl s_client -connect {{ item.address }}:{{ item.port }}
+      -servername {{ _servername }}
+      -verify_hostname {{ _servername }}
+      -verify_return_error -brief </dev/null
+  ansible.builtin.shell: "{{ _cmd }}"
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ hx_dc_host }}"
+  run_once: true
+  register: dc_check
+  changed_when: false
+  failed_when: >
+    dc_check.rc != 0 or
+    (
+      'Verification: OK' not in (dc_check.stdout | default('')) and
+      'Verification: OK' not in (dc_check.stderr | default(''))
+    )
+  loop: "{{ san_check_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# (Optional) Pretty-print each verification result in the play output
+- name: "Verify | Summary"
+  ansible.builtin.debug:
+    msg:
+      name: "{{ item.item.name }}"
+      address: "{{ item.item.address }}:{{ item.item.port }}"
+      servername: "{{ item.item.servername | default(item.item.address) }}"
+      rc: "{{ item.rc }}"
+      found_in: >-
+        {{
+          'stderr' if ('Verification: OK' in (item.stderr | default('')))
+          else 'stdout'
+        }}
+  when: dc_check is defined
+  loop: "{{ dc_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('') }}"

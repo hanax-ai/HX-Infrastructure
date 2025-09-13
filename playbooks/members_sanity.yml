@@ -1,0 +1,48 @@
+---
+- name: HX Infrastructure | High-Priority Sanity Checks
+  hosts: all
+  gather_facts: no
+  tags:
+    - high
+
+  tasks:
+    - name: "LDAP | Perform authenticated bind test to DC"
+      ansible.builtin.command: >
+        ldapsearch -Y GSSAPI -H ldap://hx-dc-server.dev-test.hana-x.ai
+        -b "dc=dev-test,dc=hana-x,dc=ai" "(objectClass=*)" -s base
+      changed_when: false
+      run_once: true
+      delegate_to: localhost
+
+    - name: "SYSVOL | Check for SYSVOL share on DC"
+      ansible.builtin.command: >
+        smbclient -L hx-dc-server.dev-test.hana-x.ai -N -g
+      register: smb_shares
+      changed_when: false
+      run_once: true
+      delegate_to: localhost
+
+    - name: "SYSVOL | Assert that SYSVOL share is present"
+      ansible.builtin.assert:
+        that:
+          - "'sysvol' in smb_shares.stdout.lower()"
+        success_msg: "SYSVOL share is present and accessible."
+        fail_msg: "SYSVOL share is MISSING."
+      run_once: true
+
+    - name: "Firewall | Gather service facts from all hosts"
+      ansible.builtin.service_facts:
+
+    - name: "Firewall | Assert that ufw service is inactive"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['ufw.service'].state == 'inactive'
+        success_msg: "ufw firewall is correctly inactive."
+        fail_msg: "ufw firewall is ACTIVE."
+
+    - name: "Firewall | Assert that firewalld service is not installed or inactive"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['firewalld.service'] is not defined or ansible_facts.services['firewalld.service'].state == 'inactive'
+        success_msg: "firewalld is correctly inactive or not present."
+        fail_msg: "firewalld firewall is ACTIVE."

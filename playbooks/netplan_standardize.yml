@@ -1,0 +1,79 @@
+- name: Standardize netplan configuration across the fleet
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    # Use short hostnames for easier mapping
+    inventory_hostname_short: "{{ inventory_hostname.split('.')[0] }}"
+    # Interface names gathered from fleet analysis
+    iface_map:
+      hx-ca-server: enp0s31f6
+      hx-dc-server: enp0s31f6
+      hx-api-server: enp0s31f6
+      hx-orchestrator-server: eno1
+      hx-vectordb-server: eno1
+      hx-llm01-server: enp131s0
+      hx-llm02-server: eno1
+      hx-postgres-server: eno1
+      hx-webui-server: enp0s31f6
+      hx-devops-server: eno1
+      hx-dev-server: eno1
+      hx-test-server: eno1
+      hx-docs-server: enp2s0
+      hx-metrics-server: eno1
+      hx-fs-server: enp0s31f6
+    # Authoritative IP map
+    ip_map:
+      hx-ca-server: "192.168.10.4/24"
+      hx-dc-server: "192.168.10.2/24"
+      hx-api-server: "192.168.10.5/24"
+      hx-orchestrator-server: "192.168.10.8/24"
+      hx-vectordb-server: "192.168.10.9/24"
+      hx-llm01-server: "192.168.10.6/24"
+      hx-llm02-server: "192.168.10.7/24"
+      hx-postgres-server: "192.168.10.10/24"
+      hx-webui-server: "192.168.10.11/24"
+      hx-devops-server: "192.168.10.14/24"
+      hx-dev-server: "192.168.10.12/24"
+      hx-test-server: "192.168.10.13/24"
+      hx-docs-server: "192.168.10.15/24"
+      hx-metrics-server: "192.168.10.16/24"
+      hx-fs-server: "192.168.10.17/24"
+    # DNS map with exception for the DC
+    dns_map:
+      default: [192.168.10.2]
+      hx-dc-server: [127.0.0.1]
+  tasks:
+    - name: Back up existing netplan files
+      ansible.builtin.command: "mkdir -p /root/netplan-backup-{{ ansible_date_time.iso8601 }} && cp -v /etc/netplan/*.yaml /root/netplan-backup-{{ ansible_date_time.iso8601 }}/"
+      register: backup_result
+      changed_when: backup_result.rc == 0
+      tags: always
+
+    - name: Find non-standard netplan files
+      ansible.builtin.find:
+        paths: /etc/netplan
+        patterns: "*.yaml"
+        excludes: "50-hx-static.yaml"
+      register: files_to_delete
+
+    - name: Purge non-standard netplan files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ files_to_delete.files }}"
+      notify: Apply netplan configuration
+
+    - name: Deploy standardized netplan configuration
+      ansible.builtin.template:
+        src: "templates/50-hx-static.yaml.j2"
+        dest: "/etc/netplan/50-hx-static.yaml"
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Apply netplan configuration
+
+  handlers:
+    - name: Apply netplan configuration
+      ansible.builtin.command: netplan apply
+      listen: "Apply netplan configuration"

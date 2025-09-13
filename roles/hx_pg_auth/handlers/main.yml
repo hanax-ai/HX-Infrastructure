@@ -1,0 +1,6 @@
+---
+- name: reload pg config
+  become: true
+  become_user: postgres
+  ansible.builtin.command: psql -c "SELECT pg_reload_conf();"
+  changed_when: true

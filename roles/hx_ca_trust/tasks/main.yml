@@ -1,0 +1,14 @@
+---
+- name: Deploy the HX root CA certificate
+  ansible.builtin.copy:
+    src: hx-root-ca.crt
+    dest: /usr/local/share/ca-certificates/hx-root-ca.crt
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Update CA trust store
+
+- name: Ensure ca-certificates package is installed
+  ansible.builtin.apt:
+    name: ca-certificates
+    state: present
