@@ -1,0 +1,50 @@
+---
+- name: Open WebUI bootstrap (use existing admin API token)
+  hosts: webui
+  gather_facts: false
+  become: true
+
+  vars:
+    webui_port: "{{ (webui_bind | default('0.0.0.0:8080')).split(':')[1] | int }}"
+    webui_url: "http://{{ inventory_hostname }}:{{ webui_port }}"
+
+  pre_tasks:
+    - name: Wait for /health OK
+      ansible.builtin.uri:
+        url: "{{ webui_url }}/health"
+        method: GET
+        status_code: 200
+      register: health
+      retries: 30
+      delay: 2
+      until: health.status == 200
+
+  tasks:
+    - name: Ensure API token is present (from group_vars)
+      ansible.builtin.assert:
+        that:
+          - webui_api_token is defined
+          - webui_api_token | length > 10
+        fail_msg: "webui_api_token missing; add it to inventories/group_vars/all/"
+
+    - name: Masked confirmation (token length only)
+      ansible.builtin.debug:
+        msg: "webui_api_token loaded (length={{ webui_api_token | length }})"
+      no_log: true
+
+    - name: Ensure /etc/open-webui exists
+      ansible.builtin.file:
+        path: /etc/open-webui
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Write admin API token to host (root only)
+      ansible.builtin.copy:
+        dest: /etc/open-webui/admin.token
+        content: "{{ webui_api_token }}\n"
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true

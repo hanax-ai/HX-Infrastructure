@@ -1,0 +1,125 @@
+---
+# Sub-task 02.01: Add LiteLLM Group to Inventory
+# Adds [litellm] group to inventories/dev.ini
+# Dependencies: Preflight checks must pass
+# Precedence: First task in inventory setup sequence
+
+- name: "Add LiteLLM Group to Inventory"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    inventory_file: "{{ playbook_dir }}/../../../../inventories/dev.ini"
+    backup_timestamp: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+    litellm_host: "hx-api-server.dev-test.hana-x.ai"
+  
+  tasks:
+    - name: Check if inventory file exists
+      stat:
+        path: "{{ inventory_file }}"
+      register: inventory_stat
+    
+    - name: Fail if inventory doesn't exist
+      fail:
+        msg: "Inventory file not found at {{ inventory_file }}"
+      when: not inventory_stat.stat.exists
+    
+    - name: Create backup of inventory
+      copy:
+        src: "{{ inventory_file }}"
+        dest: "{{ inventory_file }}.bak.{{ backup_timestamp }}"
+        backup: yes
+      register: inventory_backup
+    
+    - name: Read current inventory content
+      slurp:
+        src: "{{ inventory_file }}"
+      register: inventory_content
+    
+    - name: Check if litellm group already exists
+      set_fact:
+        litellm_exists: "{{ '[litellm]' in (inventory_content.content | b64decode) }}"
+    
+    - name: Display current status
+      debug:
+        msg: "LiteLLM group already exists in inventory"
+      when: litellm_exists
+    
+    - name: Add litellm group header
+      lineinfile:
+        path: "{{ inventory_file }}"
+        line: "\n[litellm]"
+        insertafter: EOF
+        create: no
+      when: not litellm_exists
+      register: group_added
+    
+    - name: Add host to litellm group
+      lineinfile:
+        path: "{{ inventory_file }}"
+        line: "{{ litellm_host }} ansible_user=agent0"
+        insertafter: '^\[litellm\]'
+        create: no
+      when: not litellm_exists
+      register: host_added
+    
+    - name: Verify litellm group was added
+      lineinfile:
+        path: "{{ inventory_file }}"
+        line: "[litellm]"
+        state: present
+      check_mode: yes
+      register: verify_group
+    
+    - name: Verify host was added
+      lineinfile:
+        path: "{{ inventory_file }}"
+        line: "{{ litellm_host }}"
+        state: present
+      check_mode: yes
+      register: verify_host
+    
+    - name: Create verification report
+      copy:
+        content: |
+          Inventory Update Report
+          ======================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          
+          Inventory File: {{ inventory_file }}
+          Backup Created: {{ inventory_backup.dest | default('No backup needed') }}
+          
+          LiteLLM Group Status:
+          - Previously Existed: {{ 'YES' if litellm_exists else 'NO' }}
+          - Update Required: {{ 'NO' if litellm_exists else 'YES' }}
+          - Update Applied: {{ 'YES' if (group_added.changed | default(false) or host_added.changed | default(false)) else 'NO' }}
+          
+          Verification:
+          - Group [litellm] present: {{ 'YES' if not verify_group.changed else 'NO' }}
+          - Host {{ litellm_host }} present: {{ 'YES' if not verify_host.changed else 'NO' }}
+          
+          Next Steps:
+          1. Verify the inventory with: ansible-inventory -i {{ inventory_file }} --list
+          2. Test connectivity: ansible -i {{ inventory_file }} litellm -m ping
+          3. Proceed to group_vars configuration
+        dest: "/tmp/litellm_inventory_update_{{ backup_timestamp }}.txt"
+    
+    - name: Test inventory parsing
+      command: ansible-inventory -i {{ inventory_file }} --list
+      register: inventory_test
+      changed_when: false
+    
+    - name: Verify litellm group in parsed inventory
+      assert:
+        that:
+          - "'litellm' in inventory_test.stdout"
+          - "'{{ litellm_host }}' in inventory_test.stdout"
+        fail_msg: "LiteLLM group not properly configured in inventory"
+        success_msg: "LiteLLM group successfully configured"
+    
+    - name: Display summary
+      debug:
+        msg:
+          - "Inventory configuration completed"
+          - "Backup saved to: {{ inventory_backup.dest | default('N/A') }}"
+          - "LiteLLM group status: {{ 'Already existed' if litellm_exists else 'Added successfully' }}"
+          - "Next: Configure group variables"

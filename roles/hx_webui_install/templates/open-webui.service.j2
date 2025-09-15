@@ -1,0 +1,34 @@
+[Unit]
+Description=Open WebUI (uv tool)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openwebui
+EnvironmentFile=/etc/open-webui/open-webui.env
+WorkingDirectory=/var/lib/open-webui
+Environment=PATH=/usr/local/bin:/usr/bin
+# Prefer per-user binary, fallback to system-wide wrapper if present
+ExecStartPre=/bin/sh -c '
+	if [ -x /home/openwebui/.local/bin/open-webui ]; then exit 0; fi
+	if [ -x /usr/local/bin/open-webui ]; then exit 0; fi
+	echo "open-webui binary not found in /home/openwebui/.local/bin or /usr/local/bin"; exit 1'
+ExecStart=/bin/sh -c '
+	if [ -x /home/openwebui/.local/bin/open-webui ]; then
+		exec /home/openwebui/.local/bin/open-webui serve --host {{ webui_host }} --port {{ webui_port }};
+	elif [ -x /usr/local/bin/open-webui ]; then
+		exec /usr/local/bin/open-webui serve --host {{ webui_host }} --port {{ webui_port }};
+	else
+		echo "open-webui binary not found in /home/openwebui/.local/bin or /usr/local/bin"; exit 1;
+	fi'
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/var/lib/open-webui /etc/open-webui
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

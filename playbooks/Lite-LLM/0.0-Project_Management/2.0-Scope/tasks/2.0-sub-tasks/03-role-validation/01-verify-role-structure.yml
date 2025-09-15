@@ -1,0 +1,238 @@
+---
+# Sub-task 03.01: Verify Role Directory Structure
+# Confirms roles/hx_litellm_proxy/ directory structure exists
+# Dependencies: Inventory setup must be complete
+# Precedence: First task in role validation sequence
+
+- name: "Verify Role Directory Structure"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    role_base_dir: "{{ playbook_dir }}/../../roles/hx_litellm_proxy"
+    timestamp_epoch: "{{ lookup('pipe', 'date +%s') }}"
+    timestamp_iso: "{{ lookup('pipe', 'date -Iseconds') }}"
+    required_directories:
+      - ""  # Root directory
+      - "defaults"
+      - "handlers"
+      - "meta"
+      - "tasks"
+      - "templates"
+      - "files"
+      - "vars"
+    required_files:
+      - path: "defaults/main.yml"
+        content: |
+          ---
+          # Default variables for hx_litellm_proxy role
+          
+          # Service configuration
+          litellm_service_name: litellm
+          litellm_service_description: "LiteLLM OpenAI Proxy Service"
+          
+          # User and paths
+          litellm_user: litellm
+          litellm_group: litellm
+          litellm_home: /home/litellm
+          litellm_venv_path: /home/litellm/litellm-venv
+          litellm_config_dir: /etc/litellm
+          litellm_log_dir: /var/log/litellm
+          
+          # Package version
+          litellm_package_version: "latest"
+          
+          # Service settings
+          litellm_service_restart_sec: 10
+          litellm_service_restart_policy: "on-failure"
+          litellm_service_max_retries: 3
+      - path: "handlers/main.yml"
+        content: |
+          ---
+          # Handlers for hx_litellm_proxy role
+          
+          - name: restart litellm
+            systemd:
+              name: litellm
+              state: restarted
+              daemon_reload: yes
+            become: yes
+          
+          - name: reload litellm
+            systemd:
+              name: litellm
+              state: reloaded
+            become: yes
+      - path: "meta/main.yml"
+        content: |
+          ---
+          # Meta information for hx_litellm_proxy role
+          
+          galaxy_info:
+            author: HX Infrastructure Team
+            description: Deploy and configure LiteLLM as OpenAI proxy for Ollama
+            company: Hana-X AI
+            license: Proprietary
+            min_ansible_version: 2.10
+            platforms:
+              - name: Ubuntu
+                versions:
+                  - focal
+                  - jammy
+          
+          dependencies: []
+      - path: "tasks/main.yml"
+        content: |
+          ---
+          # Main tasks for hx_litellm_proxy role
+          
+          - name: Include pre-installation tasks
+            include_tasks: pre_install.yml
+            tags: [litellm, install]
+          
+          - name: Include installation tasks
+            include_tasks: install.yml
+            tags: [litellm, install]
+          
+          - name: Include configuration tasks
+            include_tasks: configure.yml
+            tags: [litellm, configure]
+          
+          - name: Include systemd service tasks
+            include_tasks: systemd.yml
+            tags: [litellm, service]
+          
+          - name: Include validation tasks
+            include_tasks: validate.yml
+            tags: [litellm, validate]
+  
+  tasks:
+    - name: Check if role directory exists
+      stat:
+        path: "{{ role_base_dir }}"
+      register: role_dir_stat
+    
+    - name: Create role directories if missing
+      file:
+        path: "{{ role_base_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ required_directories }}"
+      register: dir_creation
+    
+    - name: Check for required files
+      stat:
+        path: "{{ role_base_dir }}/{{ item.path }}"
+      register: file_checks
+      loop: "{{ required_files }}"
+    
+    - name: Create missing required files
+      copy:
+        content: "{{ item.item.content }}"
+        dest: "{{ role_base_dir }}/{{ item.item.path }}"
+        mode: '0644'
+      when: not item.stat.exists
+      loop: "{{ file_checks.results }}"
+      register: file_creation
+    
+    - name: Verify role structure
+      find:
+        paths: "{{ role_base_dir }}"
+        recurse: yes
+        file_type: any
+      register: role_structure
+    
+    - name: Define expected template files
+      set_fact:
+        expected_templates:
+          - litellm.config.yaml.j2
+          - litellm.env.j2
+    
+    - name: Check for template files
+      stat:
+        path: "{{ role_base_dir }}/templates/{{ item }}"
+      register: template_checks
+      loop: "{{ expected_templates }}"
+    
+    - name: Verify all template files exist
+      assert:
+        that:
+          - item.stat.exists
+        fail_msg: |
+          ERROR: Missing template file: {{ item.item }}
+          Expected path: {{ role_base_dir }}/templates/{{ item.item }}
+          
+          These template files are required for the LiteLLM role to function properly.
+          Please create the missing template file or copy it from the role development resources.
+        success_msg: "Template file exists: {{ item.item }}"
+      loop: "{{ template_checks.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+    
+    - name: Create structure validation report
+      copy:
+        content: |
+          Role Structure Validation Report
+          ================================
+          Generated: {{ timestamp_iso }}
+          Role Path: {{ role_base_dir }}
+          
+          Directory Status
+          ----------------
+          Role existed: {{ 'YES' if role_dir_stat.stat.exists else 'NO' }}
+          Directories created: {{ dir_creation.results | selectattr('changed') | list | length }}
+          
+          Required Directories:
+          {% for dir in required_directories %}
+          - {{ dir if dir else 'root' }}: {{ 'Created' if dir in (dir_creation.results | selectattr('changed') | map(attribute='item') | list) else 'Exists' }}
+          {% endfor %}
+          
+          File Status
+          -----------
+          Files created: {{ file_creation.results | selectattr('changed') | list | length }}
+          
+          Required Files:
+          {% for file in file_checks.results %}
+          - {{ file.item.path }}: {{ 'Created' if file.item.path in (file_creation.results | selectattr('changed') | map(attribute='item.item.path') | list) else 'Exists' }}
+          {% endfor %}
+          
+          Complete Structure
+          ------------------
+          {{ role_base_dir }}/
+          ├── defaults/
+          │   └── main.yml
+          ├── files/
+          ├── handlers/
+          │   └── main.yml
+          ├── meta/
+          │   └── main.yml
+          ├── tasks/
+          │   └── main.yml
+          ├── templates/
+          │   ├── litellm.config.yaml.j2
+          │   └── litellm.env.j2
+          └── vars/
+          
+          Total Items: {{ role_structure.files | length }}
+          
+          Template Status
+          ---------------
+          {% for template in template_checks.results %}
+          - {{ template.item }}: {{ 'Found' if template.stat.exists else 'Missing' }}
+          {% endfor %}
+          
+          Next Steps
+          ----------
+          1. Validate template rendering
+          2. Check template variable definitions
+          3. Test role syntax
+        dest: "/tmp/litellm_role_structure_{{ timestamp_epoch }}.txt"
+    
+    - name: Display summary
+      debug:
+        msg:
+          - "Role structure validation completed"
+          - "Role path: {{ role_base_dir }}"
+          - "Directories: {{ required_directories | length }} required, {{ dir_creation.results | selectattr('changed') | list | length }} created"
+          - "Files: {{ required_files | length }} required, {{ file_creation.results | selectattr('changed') | list | length }} created"
+          - "Report: /tmp/litellm_role_structure_{{ timestamp_epoch }}.txt"
+          - "Next: Validate template files"

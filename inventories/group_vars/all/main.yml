@@ -56,6 +56,9 @@ san_check_targets:
 hx_pg_hardening_reject_nossl: true
 hx_pg_enforce_tls_floor: true
 
-# --- hx_pg_auth role toggles (non-secret) ---
-hx_pg_hardening_reject_nossl: true
-hx_pg_enforce_tls_floor: true
+# --- hx_webui_install role variables (non-secret) ---
+ollama_base_urls: "http://hx-llm01-server.dev-test.hana-x.ai:11434;http://hx-llm02-server.dev-test.hana-x.ai:11434"
+webui_bind: "0.0.0.0:8080"
+webui_allowed_origins: "http://hx-webui-server.dev-test.hana-x.ai"
+webui_auth_enabled: false
+webui_admin_email: "admin@dev-test.hana-x.ai"

@@ -1,0 +1,245 @@
+---
+# ========================================
+# LiteLLM Master Task Orchestration
+# ========================================
+# PHASE 1: PRE-FLIGHT CHECKS (REQ-3.01)
+# PHASE 2: INVENTORY SETUP (REQ-3.02)
+# PHASE 3: ROLE VALIDATION (REQ-3.03)
+# ========================================
+# This playbook orchestrates all sub-tasks with proper sequencing and dependencies
+# It ensures tasks are executed in the correct order with dependency checks
+
+- name: "LiteLLM Deployment Master Orchestration"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    base_dir: "{{ playbook_dir }}/tasks/2.0-sub-tasks"
+    timestamp: "{{ ansible_date_time.epoch }}"
+    evidence_base: "{{ playbook_dir }}/../../../.evidence"
+    
+    # Task execution flags (can be overridden with --extra-vars)
+    run_preflight: true
+    run_inventory: true
+    run_role_validation: true
+    skip_on_failure: false
+    
+    # Dependency tracking
+    task_status:
+      preflight: "not_started"
+      inventory: "not_started"
+      role_validation: "not_started"
+  
+  tasks:
+    # ========================================
+    # PHASE 1: PRE-FLIGHT CHECKS
+    # ========================================
+    - name: "PHASE 1: Pre-Flight Checks"
+      block:
+        - name: "Execute Pre-Flight Check Tasks"
+          include_tasks: "{{ item }}"
+          loop:
+            - "{{ base_dir }}/01-preflight/01-dns-resolution.yml"         # TASK-3.01.01
+            - "{{ base_dir }}/01-preflight/02-network-validation.yml"     # TASK-3.01.02
+            - "{{ base_dir }}/01-preflight/03-domain-validation.yml"      # TASK-3.01.03
+            - "{{ base_dir }}/01-preflight/04-ca-trust-validation.yml"    # TASK-3.01.04
+            - "{{ base_dir }}/01-preflight/05-python-runtime.yml"         # TASK-3.01.05
+            - "{{ base_dir }}/01-preflight/06-evidence-collection.yml"    # TASK-3.01.06
+          when: run_preflight | bool
+          
+        - name: Update preflight status
+          set_fact:
+            task_status: "{{ task_status | combine({'preflight': 'completed'}) }}"
+            
+      rescue:
+        - name: Mark preflight as failed
+          set_fact:
+            task_status: "{{ task_status | combine({'preflight': 'failed'}) }}"
+            
+        - name: Fail if skip_on_failure is false
+          fail:
+            msg: "Pre-flight checks failed. Fix issues and re-run."
+          when: not skip_on_failure | bool
+    
+    # ========================================
+    # PHASE 2: INVENTORY SETUP
+    # ========================================
+    - name: "PHASE 2: Inventory and Group Variables Setup"
+      block:
+        - name: Check preflight dependency
+          assert:
+            that:
+              - task_status.preflight == 'completed'
+            fail_msg: "Cannot proceed with inventory setup - preflight checks not completed"
+          when: not skip_on_failure | bool
+          
+        - name: "Execute Inventory Setup Tasks"
+          include_tasks: "{{ item }}"
+          loop:
+            - "{{ base_dir }}/02-inventory/01-add-litellm-group.yml"       # TASK-3.02.01
+            - "{{ base_dir }}/02-inventory/02-configure-group-vars.yml"    # TASK-3.02.02
+            - "{{ base_dir }}/02-inventory/03-setup-vault.yml"             # TASK-3.02.03
+            - "{{ base_dir }}/02-inventory/04-quarantine-stray-vaults.yml" # TASK-3.02.04
+            - "{{ base_dir }}/02-inventory/05-validate-variables.yml"      # TASK-3.02.05
+          when: run_inventory | bool
+          
+        - name: Update inventory status
+          set_fact:
+            task_status: "{{ task_status | combine({'inventory': 'completed'}) }}"
+            
+      rescue:
+        - name: Mark inventory as failed
+          set_fact:
+            task_status: "{{ task_status | combine({'inventory': 'failed'}) }}"
+            
+        - name: Fail if skip_on_failure is false
+          fail:
+            msg: "Inventory setup failed. Fix issues and re-run."
+          when: not skip_on_failure | bool
+    
+    # ========================================
+    # MANUAL INTERVENTION CHECKPOINT
+    # ========================================
+    - name: "Manual Intervention Required"
+      pause:
+        prompt: |
+          
+          ============================================
+          MANUAL INTERVENTION REQUIRED
+          ============================================
+          
+          Please complete the following manual steps:
+          
+          1. Add the master key to vault:
+             ansible-vault edit inventories/group_vars/all/vault.yml
+             
+             Add: litellm_master_key: "sk-<your-generated-key>"
+          
+          2. Verify the vault is encrypted:
+             head -1 inventories/group_vars/all/vault.yml
+             (Should show $ANSIBLE_VAULT...)
+          
+          Press ENTER when completed...
+      when: 
+        - run_inventory | bool
+        - task_status.inventory == 'completed'
+    
+    # ========================================
+    # PHASE 3: ROLE VALIDATION
+    # ========================================
+    - name: "PHASE 3: Role Structure and Template Validation"
+      block:
+        - name: Check dependencies
+          assert:
+            that:
+              - task_status.preflight == 'completed'
+              - task_status.inventory == 'completed'
+            fail_msg: "Cannot proceed with role validation - dependencies not met"
+          when: not skip_on_failure | bool
+          
+        - name: "Execute Role Validation Tasks"
+          include_tasks: "{{ item }}"
+          loop:
+            - "{{ base_dir }}/03-role-validation/01-verify-role-structure.yml"  # TASK-3.03.01
+            - "{{ base_dir }}/03-role-validation/02-validate-templates.yml"     # TASK-3.03.02
+            - "{{ base_dir }}/03-role-validation/03-render-templates.yml"       # TASK-3.03.03
+            - "{{ base_dir }}/03-role-validation/04-document-issues.yml"        # TASK-3.03.04
+          when: run_role_validation | bool
+          
+        - name: Update role validation status
+          set_fact:
+            task_status: "{{ task_status | combine({'role_validation': 'completed'}) }}"
+            
+      rescue:
+        - name: Mark role validation as failed
+          set_fact:
+            task_status: "{{ task_status | combine({'role_validation': 'failed'}) }}"
+            
+        - name: Fail if skip_on_failure is false
+          fail:
+            msg: "Role validation failed. Fix issues and re-run."
+          when: not skip_on_failure | bool
+    
+    # ========================================
+    # FINAL SUMMARY
+    # ========================================
+    - name: Generate execution summary
+      copy:
+        content: |
+          LiteLLM Task Orchestration Summary
+          ==================================
+          Execution Time: {{ ansible_date_time.iso8601 }}
+          Evidence ID: {{ timestamp }}
+          
+          Task Execution Status
+          ---------------------
+          Pre-Flight Checks:    {{ task_status.preflight | upper }}
+          Inventory Setup:      {{ task_status.inventory | upper }}
+          Role Validation:      {{ task_status.role_validation | upper }}
+          
+          Evidence Locations
+          ------------------
+          Pre-Flight: {{ evidence_base }}/api-preflight/{{ timestamp }}/
+          Role Validation: {{ evidence_base }}/litellm_role_validation/{{ timestamp }}/
+          
+          {% if task_status.preflight == 'completed' and task_status.inventory == 'completed' and task_status.role_validation == 'completed' %}
+          ✓ ALL TASKS COMPLETED SUCCESSFULLY
+          
+          Next Steps:
+          -----------
+          1. Review all evidence and reports
+          2. Proceed with deployment using:
+             ansible-playbook -i inventories/dev.ini playbooks/Lite-LLM/litellm_enforce.yml --limit hx-api-server --ask-vault-pass
+          3. Run smoke tests after deployment:
+             ansible-playbook playbooks/Lite-LLM/litellm_smoke_test.yml --ask-vault-pass
+          {% else %}
+          ✗ SOME TASKS FAILED OR WERE SKIPPED
+          
+          Failed/Incomplete Tasks:
+          {% if task_status.preflight != 'completed' %}
+          - Pre-Flight Checks: {{ task_status.preflight }}
+          {% endif %}
+          {% if task_status.inventory != 'completed' %}
+          - Inventory Setup: {{ task_status.inventory }}
+          {% endif %}
+          {% if task_status.role_validation != 'completed' %}
+          - Role Validation: {{ task_status.role_validation }}
+          {% endif %}
+          
+          Review the evidence and fix any issues before proceeding.
+          {% endif %}
+          
+          Execution Options Used
+          ----------------------
+          run_preflight: {{ run_preflight }}
+          run_inventory: {{ run_inventory }}
+          run_role_validation: {{ run_role_validation }}
+          skip_on_failure: {{ skip_on_failure }}
+          
+          To re-run specific phases:
+          ---------------------------
+          # Run only preflight:
+          ansible-playbook {{ playbook_dir }}/master-orchestration.yml -e "run_inventory=false run_role_validation=false"
+          
+          # Run only inventory setup:
+          ansible-playbook {{ playbook_dir }}/master-orchestration.yml -e "run_preflight=false run_role_validation=false"
+          
+          # Run only role validation:
+          ansible-playbook {{ playbook_dir }}/master-orchestration.yml -e "run_preflight=false run_inventory=false"
+          
+          # Continue on failures:
+          ansible-playbook {{ playbook_dir }}/master-orchestration.yml -e "skip_on_failure=true"
+        dest: "{{ evidence_base }}/litellm_orchestration_{{ timestamp }}.txt"
+    
+    - name: Display final summary
+      debug:
+        msg:
+          - "======================================"
+          - "Task Orchestration Complete"
+          - "======================================"
+          - "Pre-Flight: {{ task_status.preflight | upper }}"
+          - "Inventory: {{ task_status.inventory | upper }}"
+          - "Role Validation: {{ task_status.role_validation | upper }}"
+          - ""
+          - "Summary saved to: {{ evidence_base }}/litellm_orchestration_{{ timestamp }}.txt"
+          - ""
+          - "{% if task_status.preflight == 'completed' and task_status.inventory == 'completed' and task_status.role_validation == 'completed' %}✓ Ready for deployment!{% else %}✗ Fix issues before deployment{% endif %}"

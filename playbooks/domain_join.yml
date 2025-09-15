@@ -1,0 +1,9 @@
+---
+- name: Domain Join via realmd
+  hosts: api
+  become: true
+  gather_facts: yes
+  vars_files:
+    - ../inventories/group_vars/all/vault.yml
+  roles:
+    - hx_domain_join

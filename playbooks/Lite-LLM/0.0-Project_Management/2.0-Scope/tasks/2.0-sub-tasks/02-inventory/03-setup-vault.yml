@@ -1,0 +1,172 @@
+---
+# Sub-task 02.03: Setup Vault for Secret Variables
+# Configures vault.yml and provides master key generation instructions
+# Dependencies: 02-configure-group-vars.yml must complete
+# Precedence: Run after non-secret variables are configured
+
+- name: "Setup Vault for Secret Variables"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vault_file: "{{ playbook_dir }}/../../../../inventories/group_vars/all/vault.yml"
+    backup_timestamp: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+    master_key_var: "litellm_master_key"
+  
+  tasks:
+    - name: Check if vault file exists
+      stat:
+        path: "{{ vault_file }}"
+      register: vault_stat
+    
+    - name: Check if vault is encrypted
+      shell: head -1 {{ vault_file }} | grep -q "ANSIBLE_VAULT"
+      register: vault_encrypted
+      when: vault_stat.stat.exists
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Create backup if vault exists
+      copy:
+        src: "{{ vault_file }}"
+        dest: "{{ vault_file }}.bak.{{ backup_timestamp }}"
+        backup: yes
+      when: vault_stat.stat.exists
+      register: vault_backup
+    
+    - name: Generate sample master key
+      shell: openssl rand -hex 32 | sed 's/^/sk-/'
+      register: sample_key
+      changed_when: false
+    
+    - name: Check if master key already exists in vault
+      shell: |
+        ansible-vault view {{ vault_file }} 2>/dev/null | grep -q "{{ master_key_var }}"
+      register: key_exists
+      when: vault_stat.stat.exists and vault_encrypted.rc == 0
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Create master key setup instructions
+      copy:
+        content: |
+          LiteLLM Master Key Setup Instructions
+          =====================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          
+          IMPORTANT: Manual intervention required!
+          
+          Step 1: Generate a secure master key
+          -------------------------------------
+          Option A - Use this generated key:
+          {{ sample_key.stdout }}
+          
+          Option B - Generate your own:
+          openssl rand -hex 32 | sed 's/^/sk-/'
+          
+          Step 2: Add the key to vault
+          -----------------------------
+          {% if vault_stat.stat.exists %}
+          The vault file exists at: {{ vault_file }}
+          {% if vault_encrypted.rc == 0 %}
+          Status: ENCRYPTED (good!)
+          {% if key_exists.rc == 0 %}
+          WARNING: {{ master_key_var }} already exists in vault
+          {% else %}
+          The {{ master_key_var }} needs to be added
+          {% endif %}
+          {% else %}
+          WARNING: Vault file exists but is NOT encrypted!
+          {% endif %}
+          {% else %}
+          The vault file does not exist and needs to be created
+          {% endif %}
+          
+          Run this command to edit the vault:
+          ansible-vault edit {{ vault_file }}
+          
+          {% if not vault_stat.stat.exists %}
+          If creating new vault, start with:
+          ---
+          # Ansible Vault - Secret Variables
+          {% endif %}
+          
+          Add this line (replace with your key):
+          {{ master_key_var }}: "{{ sample_key.stdout }}"
+          
+          Step 3: Verify the vault
+          ------------------------
+          # Check syntax
+          ansible-vault view {{ vault_file }} | head -5
+          
+          # Verify the variable exists
+          ansible-vault view {{ vault_file }} | grep {{ master_key_var }}
+          
+          Step 4: Set vault password (optional)
+          -------------------------------------
+          For automation, use one of these secure methods:
+          
+          Option 1 - Environment Variable:
+          export ANSIBLE_VAULT_PASSWORD="your-vault-password"
+          echo "$ANSIBLE_VAULT_PASSWORD" | ansible-playbook playbook.yml
+          
+          Option 2 - External Secret Manager:
+          # Example with HashiCorp Vault
+          export ANSIBLE_VAULT_PASSWORD=$(vault kv get -field=password secret/ansible/vault)
+          
+          WARNING: Do NOT store vault passwords in files for production!
+          
+          Security Notes
+          --------------
+          - Keep the master key secure and never commit it unencrypted
+          - The key format should be: sk-<64-hex-characters>
+          - This key will authenticate all API requests to LiteLLM
+          - Store the key in a password manager for reference
+          - Rotate the key periodically for security
+          
+          Testing the Key
+          ---------------
+          After deployment, test with:
+          curl -H "Authorization: Bearer YOUR-KEY-HERE" \
+            http://hx-api-server.dev-test.hana-x.ai:4000/v1/models
+        dest: "/tmp/litellm_vault_setup_{{ backup_timestamp }}.txt"
+    
+    - name: Create vault template if it doesn't exist
+      copy:
+        content: |
+          ---
+          # Ansible Vault - Secret Variables
+          # Created: {{ ansible_date_time.iso8601 }}
+          # 
+          # This file should be encrypted with ansible-vault
+          # Run: ansible-vault encrypt {{ vault_file }}
+          
+          # LiteLLM master API key
+          # Generate with: openssl rand -hex 32 | sed 's/^/sk-/'
+          {{ master_key_var }}: "REPLACE_WITH_GENERATED_KEY"
+          
+          # Add other secret variables below as needed
+        dest: "{{ vault_file }}"
+        mode: '0600'
+      when: not vault_stat.stat.exists
+      register: vault_created
+    
+    - name: Display vault status
+      debug:
+        msg:
+          - "Vault Status Report"
+          - "=================="
+          - "Vault file: {{ vault_file }}"
+          - "Exists: {{ 'YES' if vault_stat.stat.exists else 'NO (created template)' }}"
+          - "Encrypted: {{ 'YES' if (vault_stat.stat.exists and vault_encrypted.rc == 0) else 'NO' }}"
+          - "Master key present: {{ 'YES' if (key_exists.rc | default(1) == 0) else 'NO or unable to check' }}"
+          - ""
+          - "REQUIRED MANUAL STEPS:"
+          - "1. Review instructions at: /tmp/litellm_vault_setup_{{ backup_timestamp }}.txt"
+          - "2. {{ 'Encrypt the vault file' if (vault_created.changed or (vault_stat.stat.exists and vault_encrypted.rc != 0)) else 'Edit the vault' }}"
+          - "3. Add the master key variable"
+          - "4. Save and verify the vault"
+    
+    - name: Ensure vault is encrypted
+      debug:
+        msg: "CRITICAL: Encrypt the vault with 'ansible-vault encrypt {{ vault_file }}'"
+      when: vault_created.changed or (vault_stat.stat.exists and vault_encrypted.rc != 0)

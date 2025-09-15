@@ -1,0 +1,146 @@
+---
+# Sub-task 02.04: Quarantine Stray Vault Files
+# Finds and quarantines any stray or corrupted vault files
+# Dependencies: 03-setup-vault.yml should complete
+# Precedence: Run after main vault setup
+
+- name: "Quarantine Stray Vault Files"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    ansible_base_dir: "{{ playbook_dir }}/../../../.."
+    quarantine_dir: "{{ ansible_base_dir }}/_quarantine"
+    vault_patterns:
+      - "**/vault.yml*"
+      - "**/vault.yaml*"
+      - "**/*vault*.yml"
+      - "**/*vault*.yaml"
+    exclude_patterns:
+      - "*/inventories/group_vars/*/vault.yml"  # Official vault location
+      - "*/_quarantine/*"  # Already quarantined
+      - "*/x-archive/*"    # Already archived
+    timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+  
+  tasks:
+    - name: Ensure quarantine directory exists
+      file:
+        path: "{{ quarantine_dir }}"
+        state: directory
+        mode: '0700'
+    
+    - name: Find all potential vault files
+      find:
+        paths: "{{ ansible_base_dir }}"
+        patterns: "{{ vault_patterns }}"
+        recurse: yes
+        excludes: "{{ exclude_patterns }}"
+      register: found_vaults
+    
+    - name: Identify stray vault files
+      set_fact:
+        stray_vaults: "{{ found_vaults.files | rejectattr('path', 'match', '.*/inventories/group_vars/.*/vault.yml$') | list }}"
+    
+    - name: Check each stray vault for corruption or issues
+      shell: |
+        if head -1 "{{ item.path }}" | grep -q "ANSIBLE_VAULT"; then
+          echo "encrypted"
+        elif grep -q "corrupted\|bad\|backup\|old" "{{ item.path }}"; then
+          echo "corrupted"
+        else
+          echo "plain"
+        fi
+      register: vault_status
+      loop: "{{ stray_vaults }}"
+      when: stray_vaults | length > 0
+      changed_when: false
+    
+    - name: Create quarantine report
+      copy:
+        content: |
+          Stray Vault Files Quarantine Report
+          ===================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Quarantine ID: {{ timestamp }}
+          
+          Summary
+          -------
+          Total files scanned: {{ found_vaults.files | length }}
+          Stray vaults found: {{ stray_vaults | length }}
+          Quarantine directory: {{ quarantine_dir }}
+          
+          Official Vault Locations (Preserved)
+          ------------------------------------
+          - {{ ansible_base_dir }}/inventories/group_vars/all/vault.yml
+          - {{ ansible_base_dir }}/inventories/group_vars/*/vault.yml
+          
+          Stray Vaults Found
+          ------------------
+          {% for vault in stray_vaults %}
+          File: {{ vault.path }}
+            Size: {{ vault.size }} bytes
+            Modified: {{ vault.mtime }}
+            Status: {{ vault_status.results[loop.index0].stdout | default('unknown') }}
+          {% endfor %}
+          
+          Actions Taken
+          -------------
+          {% if stray_vaults | length > 0 %}
+          The following files will be moved to quarantine:
+          {% for vault in stray_vaults %}
+          - {{ vault.path | basename }} -> {{ quarantine_dir }}/{{ vault.path | basename }}.{{ timestamp }}
+          {% endfor %}
+          {% else %}
+          No stray vault files found. System is clean.
+          {% endif %}
+          
+          Recommendations
+          ---------------
+          1. Review quarantined files for any important data
+          2. Extract any needed secrets before deletion
+          3. Ensure all secrets are in the official vault
+          4. Delete quarantined files after 30 days
+          
+          Security Notes
+          --------------
+          - Quarantined files may contain sensitive data
+          - Directory permissions set to 0700 (owner only)
+          - Review and securely delete unneeded files
+        dest: "{{ quarantine_dir }}/quarantine_report_{{ timestamp }}.txt"
+    
+    - name: Move stray vaults to quarantine
+      command: mv "{{ item.path }}" "{{ quarantine_dir }}/{{ item.path | basename }}.{{ timestamp }}"
+      loop: "{{ stray_vaults }}"
+      when: stray_vaults | length > 0
+      register: quarantine_moves
+    
+    - name: Create symlink to latest report
+      file:
+        src: "{{ quarantine_dir }}/quarantine_report_{{ timestamp }}.txt"
+        dest: "{{ quarantine_dir }}/LATEST_REPORT.txt"
+        state: link
+        force: yes
+    
+    - name: Check official vault locations
+      stat:
+        path: "{{ item }}"
+      register: official_vaults
+      loop:
+        - "{{ ansible_base_dir }}/inventories/group_vars/all/vault.yml"
+        - "{{ ansible_base_dir }}/inventories/group_vars/api/vault.yml"
+        - "{{ ansible_base_dir }}/inventories/group_vars/litellm/vault.yml"
+    
+    - name: Display summary
+      debug:
+        msg:
+          - "Vault Quarantine Summary"
+          - "========================"
+          - "Stray vaults found: {{ stray_vaults | length }}"
+          - "Files quarantined: {{ quarantine_moves.results | default([]) | select('changed') | list | length }}"
+          - "Report location: {{ quarantine_dir }}/quarantine_report_{{ timestamp }}.txt"
+          - ""
+          - "Official vault status:"
+          - "  all/vault.yml: {{ 'EXISTS' if official_vaults.results[0].stat.exists else 'NOT FOUND' }}"
+          - "  api/vault.yml: {{ 'EXISTS' if official_vaults.results[1].stat.exists else 'NOT FOUND' }}"
+          - "  litellm/vault.yml: {{ 'EXISTS' if official_vaults.results[2].stat.exists else 'NOT FOUND' }}"
+          - ""
+          - "Next: Validate all inventory variables"

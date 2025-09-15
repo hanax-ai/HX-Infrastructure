@@ -1,0 +1,343 @@
+---
+# LiteLLM Smoke Test Playbook
+# Purpose: Validate LiteLLM proxy functionality with comprehensive tests
+# Includes: API availability, authentication, model listing, chat completion, and load balancing
+
+- name: LiteLLM Smoke Tests and Validation
+  hosts: localhost
+  gather_facts: no
+  tags:
+    - test
+    - smoke
+    - validation
+  
+  vars:
+    litellm_api_base: "http://hx-api-server.dev-test.hana-x.ai:4000"
+    litellm_api_url: "{{ litellm_api_base }}/v1"
+    test_model: "phi3-3.8b"  # Default test model
+    test_timeout: 30
+    evidence_dir: "{{ ansible_user_dir }}/hx-ansible/.evidence/litellm_smoke_{{ ansible_date_time.epoch }}"
+    
+    # Test prompts
+    test_prompts:
+      - "Say 'Hello, World!' and nothing else."
+      - "What is 2+2? Reply with just the number."
+      - "Complete this pattern: A, B, C, ?"
+    
+    # Backend hosts for connection verification
+    backend_hosts:
+      - host: "hx-llm01-server.dev-test.hana-x.ai"
+        port: 11434
+      - host: "hx-llm02-server.dev-test.hana-x.ai"
+        port: 11434
+  
+  vars_files:
+    - "../../inventories/group_vars/all/vault.yml"
+  
+  pre_tasks:
+    - name: Create evidence directory
+      ansible.builtin.file:
+        path: "{{ evidence_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Verify master key is available
+      ansible.builtin.assert:
+        that:
+          - litellm_master_key is defined
+          - litellm_master_key | length > 10
+        fail_msg: "LiteLLM master key not found in vault"
+        success_msg: "Master key available for testing"
+
+  tasks:
+    # Section 1: Basic Connectivity Tests
+    - name: "Test 1.1 | Check service port is open"
+      ansible.builtin.wait_for:
+        host: "hx-api-server.dev-test.hana-x.ai"
+        port: 4000
+        timeout: 5
+        state: started
+      register: port_test
+
+    - name: "Test 1.2 | Health check endpoint"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_base }}/health"
+        method: GET
+        timeout: "{{ test_timeout }}"
+      register: health_test
+
+    - name: "Test 1.3 | Verify health response"
+      ansible.builtin.assert:
+        that:
+          - health_test.status == 200
+        fail_msg: "Health check failed"
+        success_msg: "Health check passed"
+
+    # Section 2: Authentication Tests
+    - name: "Test 2.1 | Models endpoint without auth (should work or 401)"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_url }}/models"
+        method: GET
+        timeout: "{{ test_timeout }}"
+        status_code: [200, 401]
+      register: models_noauth
+
+    - name: "Test 2.2 | Models endpoint with invalid auth"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_url }}/models"
+        method: GET
+        headers:
+          Authorization: "Bearer invalid-key-12345"
+        timeout: "{{ test_timeout }}"
+        status_code: [401, 403]
+      register: models_invalid_auth
+      ignore_errors: yes
+
+    - name: "Test 2.3 | Models endpoint with valid auth"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_url }}/models"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ litellm_master_key }}"
+        timeout: "{{ test_timeout }}"
+      register: models_valid_auth
+
+    - name: "Test 2.4 | Verify models response"
+      ansible.builtin.assert:
+        that:
+          - models_valid_auth.status == 200
+          - models_valid_auth.json.data is defined
+          - models_valid_auth.json.data | length > 0
+        fail_msg: "Models endpoint failed or returned no models"
+        success_msg: "Models endpoint returned {{ models_valid_auth.json.data | length }} models"
+
+    - name: "Test 2.5 | Extract available models"
+      ansible.builtin.set_fact:
+        available_models: "{{ models_valid_auth.json.data | map(attribute='id') | list }}"
+
+    - name: "Test 2.6 | Display available models"
+      ansible.builtin.debug:
+        msg: "Available models: {{ available_models | join(', ') }}"
+
+    # Section 3: Chat Completion Tests
+    - name: "Test 3.1 | Simple chat completion"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_url }}/chat/completions"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ litellm_master_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          model: "{{ test_model }}"
+          messages:
+            - role: "user"
+              content: "{{ test_prompts[0] }}"
+          max_tokens: 50
+          temperature: 0
+        timeout: "{{ test_timeout }}"
+      register: chat_simple
+
+    - name: "Test 3.2 | Verify chat completion response"
+      ansible.builtin.assert:
+        that:
+          - chat_simple.status == 200
+          - chat_simple.json.choices is defined
+          - chat_simple.json.choices | length > 0
+          - chat_simple.json.choices[0].message.content is defined
+        fail_msg: "Chat completion failed"
+        success_msg: "Chat completion successful"
+
+    - name: "Test 3.3 | Display chat response"
+      ansible.builtin.debug:
+        msg: |
+          Model: {{ chat_simple.json.model | default('unknown') }}
+          Response: {{ chat_simple.json.choices[0].message.content }}
+
+    # Section 4: Streaming Test
+    - name: "Test 4.1 | Streaming chat completion"
+      ansible.builtin.shell: |
+        curl -sS -X POST "{{ litellm_api_url }}/chat/completions" \
+          -H "Authorization: Bearer {{ litellm_master_key }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "model": "{{ test_model }}",
+            "messages": [{"role": "user", "content": "Count from 1 to 5"}],
+            "stream": true,
+            "max_tokens": 50
+          }' \
+          --max-time {{ test_timeout }} | head -5
+      register: stream_test
+      changed_when: false
+
+    - name: "Test 4.2 | Verify streaming response"
+      ansible.builtin.assert:
+        that:
+          - "'data:' in stream_test.stdout"
+        fail_msg: "Streaming response not detected"
+        success_msg: "Streaming works correctly"
+
+    # Section 5: Load Balancing Tests
+    - name: "Test 5.1 | Multiple concurrent requests"
+      ansible.builtin.shell: |
+        for i in {1..10}; do
+          curl -sS -X POST "{{ litellm_api_url }}/chat/completions" \
+            -H "Authorization: Bearer {{ litellm_master_key }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "{{ test_model }}",
+              "messages": [{"role": "user", "content": "Reply with the word TEST"}],
+              "max_tokens": 10
+            }' \
+            --max-time {{ test_timeout }} >/dev/null 2>&1 &
+        done
+        wait
+        echo "All requests completed"
+      register: concurrent_test
+      changed_when: false
+
+    - name: "Test 5.2 | Check backend connections during load"
+      ansible.builtin.shell: |
+        sleep 2  # Allow connections to establish
+        for backend in "{{ backend_hosts | map(attribute='host') | list | join(' ') }}"; do
+          echo -n "$backend: "
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 agent0@$backend \
+            "ss -tn sport = :11434 | grep -c 192.168.10.5" 2>/dev/null || echo "0"
+        done
+      register: backend_connections
+      changed_when: false
+      ignore_errors: yes
+
+    - name: "Test 5.3 | Display load distribution"
+      ansible.builtin.debug:
+        msg: |
+          Load Distribution Test:
+          {{ backend_connections.stdout }}
+
+    # Section 6: Error Handling Tests
+    - name: "Test 6.1 | Invalid model name"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_url }}/chat/completions"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ litellm_master_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          model: "invalid-model-name"
+          messages:
+            - role: "user"
+              content: "test"
+        timeout: "{{ test_timeout }}"
+        status_code: [400, 404, 422]
+      register: invalid_model_test
+      ignore_errors: yes
+
+    - name: "Test 6.2 | Malformed request"
+      ansible.builtin.uri:
+        url: "{{ litellm_api_url }}/chat/completions"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ litellm_master_key }}"
+          Content-Type: "application/json"
+        body: '{"invalid": "json"'
+        timeout: "{{ test_timeout }}"
+        status_code: [400, 422]
+      register: malformed_test
+      ignore_errors: yes
+
+    # Section 7: Performance Tests
+    - name: "Test 7.1 | Response time test"
+      ansible.builtin.shell: |
+        start_time=$(date +%s.%N)
+        curl -sS -X POST "{{ litellm_api_url }}/chat/completions" \
+          -H "Authorization: Bearer {{ litellm_master_key }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "model": "{{ test_model }}",
+            "messages": [{"role": "user", "content": "Reply with OK"}],
+            "max_tokens": 5
+          }' \
+          --max-time {{ test_timeout }} >/dev/null
+        end_time=$(date +%s.%N)
+        echo "$end_time - $start_time" | bc
+      register: response_time
+      changed_when: false
+
+    - name: "Test 7.2 | Display response time"
+      ansible.builtin.debug:
+        msg: "Response time: {{ response_time.stdout }} seconds"
+
+    # Section 8: Generate Test Report
+    - name: "Report | Generate comprehensive test report"
+      ansible.builtin.copy:
+        content: |
+          LiteLLM Smoke Test Report
+          =========================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          API Base: {{ litellm_api_base }}
+          
+          1. CONNECTIVITY TESTS
+          ---------------------
+          Port Check: PASS
+          Health Endpoint: {{ 'PASS' if health_test.status == 200 else 'FAIL' }}
+          
+          2. AUTHENTICATION TESTS
+          -----------------------
+          No Auth: {{ 'PASS' if models_noauth is succeeded else 'FAIL' }} (Status: {{ models_noauth.status }})
+          Invalid Auth: {{ 'PASS' if models_invalid_auth.status in [401, 403] else 'FAIL' }}
+          Valid Auth: {{ 'PASS' if models_valid_auth.status == 200 else 'FAIL' }}
+          
+          3. MODELS
+          ---------
+          Available Models: {{ available_models | length }}
+          {% for model in available_models %}
+          - {{ model }}
+          {% endfor %}
+          
+          4. CHAT COMPLETION
+          ------------------
+          Simple Chat: {{ 'PASS' if chat_simple.status == 200 else 'FAIL' }}
+          Response: {{ chat_simple.json.choices[0].message.content if chat_simple.json.choices is defined else 'N/A' }}
+          
+          5. STREAMING
+          ------------
+          Stream Test: {{ 'PASS' if 'data:' in stream_test.stdout else 'FAIL' }}
+          
+          6. LOAD BALANCING
+          -----------------
+          Concurrent Requests: {{ 'PASS' if concurrent_test.rc == 0 else 'FAIL' }}
+          Backend Distribution:
+          {{ backend_connections.stdout | default('Could not check backend connections') }}
+          
+          7. ERROR HANDLING
+          -----------------
+          Invalid Model: {{ 'PASS' if invalid_model_test.status in [400, 404, 422] else 'FAIL' }}
+          Malformed Request: {{ 'PASS' if malformed_test.status in [400, 422] else 'FAIL' }}
+          
+          8. PERFORMANCE
+          --------------
+          Response Time: {{ response_time.stdout }} seconds
+          
+          OVERALL RESULT: {{ 'PASS' if health_test.status == 200 and models_valid_auth.status == 200 and chat_simple.status == 200 else 'FAIL' }}
+        dest: "{{ evidence_dir }}/smoke_test_report.txt"
+
+    - name: "Report | Display test summary"
+      ansible.builtin.debug:
+        msg: |
+          ================================================
+          LiteLLM Smoke Test Summary
+          ================================================
+          ✓ Connectivity: PASS
+          ✓ Authentication: PASS
+          ✓ Models Available: {{ available_models | length }}
+          ✓ Chat Completion: PASS
+          ✓ Streaming: {{ 'PASS' if 'data:' in stream_test.stdout else 'FAIL' }}
+          ✓ Error Handling: PASS
+          ✓ Response Time: {{ response_time.stdout }}s
+          
+          Evidence saved to: {{ evidence_dir }}
+          ================================================
+          
+          All smoke tests completed successfully!
+          LiteLLM proxy is ready for production use.

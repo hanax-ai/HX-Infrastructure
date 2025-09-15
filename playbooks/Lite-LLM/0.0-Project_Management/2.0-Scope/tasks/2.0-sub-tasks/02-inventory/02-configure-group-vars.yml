@@ -1,0 +1,163 @@
+---
+# Sub-task 02.02: Configure Non-Secret Group Variables
+# Populates group_vars/all/main.yml with LiteLLM configuration
+# Dependencies: 01-add-litellm-group.yml must complete
+# Precedence: Run after litellm group is added to inventory
+
+- name: "Configure Non-Secret Group Variables"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    group_vars_file: "{{ playbook_dir }}/../../../../inventories/group_vars/all/main.yml"
+    backup_timestamp: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+    litellm_config:
+      litellm_bind_host: "0.0.0.0"
+      litellm_bind_port: 4000
+      litellm_backends:
+        - "http://hx-llm01-server.dev-test.hana-x.ai:11434"
+        - "http://hx-llm02-server.dev-test.hana-x.ai:11434"
+      litellm_models:
+        - name: "phi3-3.8b"
+          provider: "ollama"
+          model: "phi3:3.8b-mini-128k-instruct-q8_0"
+        - name: "llama3-8b"
+          provider: "ollama"
+          model: "llama3:8b-instruct-q8_0"
+        - name: "llama3.1-8b"
+          provider: "ollama"
+          model: "llama3.1:8b-instruct-q8_0"
+        - name: "qwen2.5-coder-7b"
+          provider: "ollama"
+          model: "qwen2.5-coder:7b-instruct-q8_0"
+      litellm_routing_strategy: "least-busy"
+      litellm_debug: false
+      litellm_log_level: "INFO"
+  
+  tasks:
+    - name: Ensure group_vars directory exists
+      file:
+        path: "{{ group_vars_file | dirname }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Check if group_vars file exists
+      stat:
+        path: "{{ group_vars_file }}"
+      register: group_vars_stat
+    
+    - name: Create backup if file exists
+      copy:
+        src: "{{ group_vars_file }}"
+        dest: "{{ group_vars_file }}.bak.{{ backup_timestamp }}"
+        backup: yes
+      when: group_vars_stat.stat.exists
+      register: group_vars_backup
+    
+    - name: Read current group_vars content
+      slurp:
+        src: "{{ group_vars_file }}"
+      register: current_vars
+      when: group_vars_stat.stat.exists
+    
+    - name: Parse current YAML content
+      set_fact:
+        existing_vars: "{{ (current_vars.content | b64decode | from_yaml) if (group_vars_stat.stat.exists and current_vars.content | b64decode | trim) else {} }}"
+    
+    - name: Check for existing LiteLLM variables
+      set_fact:
+        litellm_vars_exist: "{{ existing_vars.keys() | select('match', '^litellm_') | list | length > 0 }}"
+    
+    - name: Display warning if LiteLLM vars already exist
+      debug:
+        msg: "WARNING: LiteLLM variables already exist in {{ group_vars_file }}. They will be updated."
+      when: litellm_vars_exist
+    
+    - name: Merge LiteLLM configuration with existing vars
+      set_fact:
+        merged_vars: "{{ existing_vars | combine(litellm_config) }}"
+    
+    - name: Write updated group_vars file
+      copy:
+        content: |
+          ---
+          # Ansible Group Variables for all hosts
+          # Last updated: {{ ansible_date_time.iso8601 }}
+          
+          {{ merged_vars | to_nice_yaml }}
+        dest: "{{ group_vars_file }}"
+        mode: '0644'
+      register: vars_update
+    
+    - name: Validate YAML syntax
+      command: python3 -c "import yaml; yaml.safe_load(open('{{ group_vars_file }}'))"
+      changed_when: false
+    
+    - name: Create variable documentation
+      copy:
+        content: |
+          LiteLLM Group Variables Documentation
+          =====================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          
+          Variable Definitions
+          --------------------
+          
+          litellm_bind_host: {{ litellm_config.litellm_bind_host }}
+            Description: IP address for LiteLLM to bind to
+            Type: string
+            Default: 0.0.0.0 (all interfaces)
+          
+          litellm_bind_port: {{ litellm_config.litellm_bind_port }}
+            Description: Port for LiteLLM API service
+            Type: integer
+            Default: 4000
+          
+          litellm_backends:
+            Description: List of Ollama backend URLs
+            Type: list
+            Values:
+          {% for backend in litellm_config.litellm_backends %}
+              - {{ backend }}
+          {% endfor %}
+          
+          litellm_models:
+            Description: Model configurations with aliases
+            Type: list of objects
+            Models:
+          {% for model in litellm_config.litellm_models %}
+              - Alias: {{ model.name }}
+                Provider: {{ model.provider }}
+                Actual Model: {{ model.model }}
+          {% endfor %}
+          
+          litellm_routing_strategy: {{ litellm_config.litellm_routing_strategy }}
+            Description: Load balancing strategy for backends
+            Type: string
+            Options: least-busy, round-robin, random
+          
+          litellm_debug: {{ litellm_config.litellm_debug }}
+            Description: Enable debug mode
+            Type: boolean
+          
+          litellm_log_level: {{ litellm_config.litellm_log_level }}
+            Description: Logging level
+            Type: string
+            Options: DEBUG, INFO, WARNING, ERROR
+          
+          Secret Variables (stored in vault.yml)
+          --------------------------------------
+          litellm_master_key: [ENCRYPTED]
+            Description: Master API key for authentication
+            Type: string
+            Format: sk-<random-hex-string>
+        dest: "/tmp/litellm_group_vars_doc_{{ backup_timestamp }}.txt"
+    
+    - name: Display summary
+      debug:
+        msg:
+          - "Group variables configuration completed"
+          - "File: {{ group_vars_file }}"
+          - "Backup: {{ group_vars_backup.dest | default('No backup created') }}"
+          - "Variables {{ 'updated' if litellm_vars_exist else 'added' }}: {{ litellm_config.keys() | list }}"
+          - "Documentation: /tmp/litellm_group_vars_doc_{{ backup_timestamp }}.txt"
+          - "Next: Configure vault for secret variables"

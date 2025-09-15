@@ -1,0 +1,77 @@
+---
+- name: PostgreSQL/Redis smoke (non-intrusive)
+  hosts: hx-devops-server.dev-test.hana-x.ai
+  gather_facts: false
+  vars:
+    hx_pg_host: "hx-postgres-server.dev-test.hana-x.ai"
+    hx_pg_db: "hx_app_db"
+    hx_pg_app_user: "hx_app"
+    hx_pg_ca_path: "/usr/local/share/ca-certificates/hx-root-ca.crt"
+    hx_redis_host: "hx-postgres-server.dev-test.hana-x.ai"
+    hx_redis_port: 6379
+  hx_redis_password: "{{ vault_redis_password }}"   # vaulted
+  vars_files:
+    - "../inventories/group_vars/all/vault.yml"
+
+  tasks:
+    - name: Show target versions (client-side)
+      command: psql --version
+      register: psqlv
+      changed_when: false
+
+    - debug:
+        msg: "{{ psqlv.stdout }}"
+      changed_when: false
+
+    - name: Check if Kerberos TGT exists (skip prompt)
+      command: klist -s
+      register: tgt_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: GSS/SSO connection (only if TGT exists)
+      shell: >
+        . /etc/hx/connection_env &&
+        psql "${HXP_PG_URL_GSS} user=agent0 sslrootcert=${HXP_PG_CA}" -v VERBOSITY=terse -c '\conninfo'
+      when: tgt_check.rc == 0
+      register: gss_conn
+      changed_when: false
+
+    - name: Show GSS/SSO result
+      debug:
+        var: gss_conn.stdout_lines
+      when: tgt_check.rc == 0
+      changed_when: false
+
+    - name: SCRAM/TLS connection (password from vault)
+      shell: >
+        . /etc/hx/connection_env &&
+        PGPASSWORD='{{ hx_pg_app_password }}'
+        psql "postgresql://{{ hx_pg_app_user }}:{{ hx_pg_app_password }}@{{ hx_pg_host }}:5432/{{ hx_pg_db }}?sslmode=verify-full&sslrootcert={{ hx_pg_ca_path }}"
+        -v VERBOSITY=terse -c '\conninfo'
+      register: scram_conn
+      no_log: true
+      changed_when: false
+
+    - name: Confirm SCRAM/TLS OK
+      debug:
+        msg: "SCRAM/TLS OK"
+      when: scram_conn.rc == 0
+      changed_when: false
+
+    - name: Redis PING (optional if password provided)
+      command: >
+        redis-cli -h {{ hx_redis_host }} -p {{ hx_redis_port }} -a "{{ hx_redis_password }}" PING
+      register: redis_ping
+      when: hx_redis_password | length > 0
+      no_log: true
+      changed_when: false
+
+    - name: Confirm Redis OK
+      debug:
+        msg: "Redis PONG"
+      when:
+        - hx_redis_password | length > 0
+        - redis_ping.stdout is defined
+        - redis_ping.stdout | trim == "PONG"
+      changed_when: false

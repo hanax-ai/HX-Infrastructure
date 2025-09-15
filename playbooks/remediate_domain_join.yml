@@ -1,0 +1,5 @@
+---
+- hosts: hx-api-server.dev-test.hana-x.ai
+  become: true
+  roles:
+    - hx_domain_join

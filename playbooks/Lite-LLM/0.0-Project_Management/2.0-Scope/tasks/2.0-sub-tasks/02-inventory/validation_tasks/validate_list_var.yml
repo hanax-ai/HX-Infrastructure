@@ -1,0 +1,37 @@
+---
+# Validate a single list variable
+- name: "Validate list variable: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: "{{ var_config.name in main_vars }}"
+      value: "{{ main_vars[var_config.name] | default(None) }}"
+      valid: false
+      message: "Variable not found"
+  when: var_config.name not in main_vars
+
+- name: "Validate list type and size for: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: true
+      value: "{{ main_vars[var_config.name] }}"
+      valid: "{{ main_vars[var_config.name] is sequence and 
+                 main_vars[var_config.name] is not string and
+                 main_vars[var_config.name] | length >= (var_config.min_items | default(0)) }}"
+      message: >-
+        {% if main_vars[var_config.name] is not sequence or main_vars[var_config.name] is string %}
+        Invalid type. Expected list, got {{ main_vars[var_config.name] | type_debug }}
+        {% elif main_vars[var_config.name] | length < (var_config.min_items | default(0)) %}
+        List too short. Minimum items: {{ var_config.min_items }}
+        {% else %}
+        OK
+        {% endif %}
+  when: var_config.name in main_vars
+
+- name: Add list validation result
+  set_fact:
+    validation_results: "{{ validation_results + [validation_item] }}"
+    validation_passed: "{{ validation_passed and validation_item.valid }}"

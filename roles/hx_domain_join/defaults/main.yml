@@ -1,0 +1,4 @@
+---
+ad_domain: "dev-test.hana-x.ai"
+ad_admin_user: "agent0"
+ad_admin_password: "" # This should be supplied via vault at runtime

@@ -1,0 +1,351 @@
+---
+# Task 3.01 - Pre-Flight Checks and Environment Validation
+# Purpose: Ensure the target host meets all prerequisites before LiteLLM deployment
+# Evidence: Saved to ~/hx-ansible/.evidence/api-preflight/<timestamp>/
+#
+# Usage:
+#   ansible-playbook playbooks/Lite-LLM/litellm_preflight.yml -i inventories/dev.ini
+#   ansible-playbook playbooks/Lite-LLM/litellm_preflight.yml -i inventories/prod.ini
+#   ansible-playbook playbooks/Lite-LLM/litellm_preflight.yml -e "target_hosts=specific-host"
+#
+# Required inventory group: 'api' or 'litellm_servers'
+# Or use -e "target_hosts=hostname" to override
+
+- name: LiteLLM Pre-Flight Checks and Environment Validation
+  hosts: "{{ target_hosts | default('api') }}"
+  gather_facts: yes
+  become: yes
+  tags:
+    - preflight
+    - validation
+  
+  vars:
+    evidence_base_dir: "{{ ansible_user_dir }}/hx-ansible/.evidence/api-preflight"
+    evidence_timestamp: "{{ ansible_date_time.epoch }}"
+    evidence_dir: "{{ evidence_base_dir }}/{{ evidence_timestamp }}"
+    
+    # DNS server configuration - defaults to dc_ip but can be overridden
+    # Set to empty string to use system resolver
+    dns_server: "{{ dc_ip | default('') }}"
+    
+    # DNS targets for validation - dynamically generated from inventory
+    # Only include hosts that are relevant for LiteLLM deployment
+    dns_check_hosts:
+      - hx-api-server
+      - hx-llm01-server
+      - hx-llm02-server
+      - hx-dc-server
+    
+    # Generate DNS checks from inventory variables
+    dns_checks: |
+      {% set checks = [] %}
+      {% for host in dns_check_hosts %}
+      {% if host in ip_map %}
+      {% set _ = checks.append({
+        'hostname': host + '.' + domain_name,
+        'expected_ip': ip_map[host].split('/')[0]
+      }) %}
+      {% endif %}
+      {% endfor %}
+      {{ checks }}
+    
+    # Network connectivity checks - use inventory variables
+    network_checks:
+      - { host: "hx-dc-server.{{ domain_name }}", port: 53, service: "DNS" }
+      - { host: "hx-llm01-server.{{ domain_name }}", port: 11434, service: "Ollama" }
+      - { host: "hx-llm02-server.{{ domain_name }}", port: 11434, service: "Ollama" }
+
+  pre_tasks:
+    - name: Create evidence directory
+      ansible.builtin.file:
+        path: "{{ evidence_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+  tasks:
+    # Section 1: DNS Resolution Checks
+    - name: "DNS | Validate A records"
+      ansible.builtin.assert:
+        that:
+          - "item.expected_ip in lookup('dig', item.hostname + '/A', '@' + dns_server) if dns_server else item.expected_ip in lookup('dig', item.hostname + '/A')"
+        success_msg: "A record for {{ item.hostname }} resolves to {{ item.expected_ip }}{{ ' (using DNS server: ' + dns_server + ')' if dns_server else ' (using system resolver)' }}"
+        fail_msg: "A record for {{ item.hostname }} is missing or incorrect"
+      loop: "{{ dns_checks }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      register: dns_a_record_results
+
+    - name: "DNS | Validate PTR records"
+      ansible.builtin.assert:
+        that:
+          - "(item.hostname + '.' in lookup('dig', item.expected_ip + '/PTR', '@' + dns_server)) if dns_server else (item.hostname + '.' in lookup('dig', item.expected_ip + '/PTR'))"
+        success_msg: "PTR record for {{ item.expected_ip }} resolves to {{ item.hostname }}{{ ' (using DNS server: ' + dns_server + ')' if dns_server else ' (using system resolver)' }}"
+        fail_msg: "PTR record for {{ item.expected_ip }} is missing or incorrect"
+      loop: "{{ dns_checks }}"
+      loop_control:
+        label: "{{ item.expected_ip }}"
+      register: dns_ptr_record_results
+
+    - name: "DNS | Save DNS validation evidence"
+      ansible.builtin.copy:
+        content: |
+          DNS Validation Results - {{ ansible_date_time.iso8601 }}
+          =====================================================
+          
+          A Record Checks:
+          {% for item in dns_checks %}
+          {{ item.hostname }} -> {{ item.expected_ip }}: PASS
+          {% endfor %}
+          
+          PTR Record Checks:
+          {% for item in dns_checks %}
+          {{ item.expected_ip }} -> {{ item.hostname }}: PASS
+          {% endfor %}
+        dest: "{{ evidence_dir }}/dns_validation.txt"
+      delegate_to: localhost
+
+    # Section 2: Network Configuration Checks
+    - name: "Network | Gather netplan configuration"
+      ansible.builtin.command: netplan status --all
+      register: netplan_status
+      changed_when: false
+      failed_when: false
+
+    - name: "Network | Check resolver configuration"
+      ansible.builtin.command: resolvectl status
+      register: resolver_status
+      changed_when: false
+
+    - name: "Network | Verify single netplan file"
+      ansible.builtin.find:
+        paths: /etc/netplan
+        patterns: "*.yaml,*.yml"
+      register: netplan_files
+
+    - name: "Network | Assert single netplan configuration"
+      ansible.builtin.assert:
+        that:
+          - netplan_files.files | length == 1
+        success_msg: "Single netplan configuration file found"
+        fail_msg: "Multiple netplan files detected - requires cleanup"
+
+    - name: "Network | Save network configuration evidence"
+      ansible.builtin.copy:
+        content: |
+          Network Configuration Evidence - {{ ansible_date_time.iso8601 }}
+          ===========================================================
+          
+          Netplan Files Found: {{ netplan_files.files | length }}
+          {% for file in netplan_files.files %}
+          - {{ file.path }}
+          {% endfor %}
+          
+          Netplan Status:
+          {{ netplan_status.stdout }}
+          
+          Resolver Status:
+          {{ resolver_status.stdout }}
+        dest: "{{ evidence_dir }}/network_config.txt"
+      delegate_to: localhost
+
+    # Section 3: Connectivity Checks
+    - name: "Connectivity | Verify essential ports are reachable"
+      ansible.builtin.wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        state: started
+        timeout: 5
+      loop: "{{ network_checks }}"
+      loop_control:
+        label: "{{ item.host }}:{{ item.port }} ({{ item.service }})"
+      register: connectivity_results
+
+    # Section 4: Domain Join and Privileges
+    - name: "Domain | Check realm membership"
+      ansible.builtin.command: realm list
+      register: realm_status
+      changed_when: false
+
+    - name: "Domain | Verify agent0 user exists"
+      ansible.builtin.command: id agent0
+      register: agent0_id
+      changed_when: false
+
+    - name: "Domain | Check sudo privileges for agent0"
+      ansible.builtin.command: sudo -l -U agent0
+      register: agent0_sudo
+      changed_when: false
+
+    - name: "Domain | Assert domain join is valid"
+      ansible.builtin.assert:
+        that:
+          - "'dev-test.hana-x.ai' in realm_status.stdout"
+          - "'agent0' in agent0_id.stdout"
+          - "'ALL' in agent0_sudo.stdout or 'NOPASSWD' in agent0_sudo.stdout"
+        success_msg: "Domain join and privileges validated"
+        fail_msg: "Domain join or privileges issue detected"
+
+    - name: "Domain | Save domain validation evidence"
+      ansible.builtin.copy:
+        content: |
+          Domain Validation Evidence - {{ ansible_date_time.iso8601 }}
+          ========================================================
+          
+          Realm Status:
+          {{ realm_status.stdout }}
+          
+          Agent0 ID:
+          {{ agent0_id.stdout }}
+          
+          Agent0 Sudo Privileges:
+          {{ agent0_sudo.stdout }}
+        dest: "{{ evidence_dir }}/domain_validation.txt"
+      delegate_to: localhost
+
+    # Section 5: CA Trust Validation
+    - name: "CA Trust | Check HX Root CA presence"
+      ansible.builtin.stat:
+        path: /usr/local/share/ca-certificates/hx-root-ca.crt
+      register: hx_ca_file
+
+    - name: "CA Trust | Assert HX Root CA is installed"
+      ansible.builtin.assert:
+        that:
+          - hx_ca_file.stat.exists
+          - hx_ca_file.stat.size > 0
+        success_msg: "HX Root CA certificate found"
+        fail_msg: "HX Root CA certificate missing"
+
+    - name: "CA Trust | Verify TLS connection to internal service"
+      ansible.builtin.command:
+        cmd: >-
+          timeout 5 openssl s_client
+          -connect hx-vectordb-server.dev-test.hana-x.ai:6333
+          -servername hx-vectordb-server.dev-test.hana-x.ai
+          -CAfile /etc/ssl/certs/ca-certificates.crt
+          -verify_return_error
+        stdin: ""
+      register: tls_verify
+      changed_when: false
+      failed_when: false
+
+    - name: "CA Trust | Assert TLS verification succeeds"
+      ansible.builtin.assert:
+        that:
+          - tls_verify.rc == 0 or (tls_verify.stdout | regex_search('(Verify return code:|verify return:)\\s*0'))
+        success_msg: "TLS trust chain validated"
+        fail_msg: |
+          TLS trust chain validation FAILED
+          Exit code: {{ tls_verify.rc }}
+          Error output: {{ tls_verify.stderr | default('No stderr captured') }}
+          Stdout: {{ tls_verify.stdout | default('No stdout captured') }}
+
+    # Section 6: Python Runtime Checks
+    - name: "Python | Check Python 3.11 availability"
+      ansible.builtin.command: python3.11 --version
+      register: python311_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: "Python | Install Python 3.11 if missing"
+      ansible.builtin.apt:
+        name:
+          - python3.11
+          - python3.11-venv
+          - python3-pip
+        state: present
+        update_cache: yes
+      when: python311_check.rc != 0
+
+    - name: "Python | Verify pip installation"
+      ansible.builtin.command: python3 -m pip --version
+      register: pip_version
+      changed_when: false
+
+    - name: "Python | Save Python runtime evidence"
+      ansible.builtin.copy:
+        content: |
+          Python Runtime Evidence - {{ ansible_date_time.iso8601 }}
+          =====================================================
+          
+          Python 3.11 Status:
+          {% if python311_check.rc == 0 %}
+          {{ python311_check.stdout }}
+          {% else %}
+          Python 3.11 was not found and has been installed
+          {% endif %}
+          
+          Pip Version:
+          {{ pip_version.stdout }}
+        dest: "{{ evidence_dir }}/python_runtime.txt"
+      delegate_to: localhost
+
+    # Section 7: System State Evidence Collection
+    - name: "Evidence | Collect system information"
+      ansible.builtin.setup:
+        gather_subset:
+          - network
+          - hardware
+          - virtual
+      register: system_facts
+
+    - name: "Evidence | Save system state"
+      ansible.builtin.copy:
+        content: |
+          System State Evidence - {{ ansible_date_time.iso8601 }}
+          ==================================================
+          
+          Hostname: {{ ansible_hostname }}
+          FQDN: {{ ansible_fqdn }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Kernel: {{ ansible_kernel }}
+          Architecture: {{ ansible_architecture }}
+          
+          Network Interfaces:
+          {% for iface in ansible_interfaces %}
+          {% if ansible_facts[iface] is defined and ansible_facts[iface].ipv4 is defined %}
+          - {{ iface }}: {{ ansible_facts[iface].ipv4.address | default('N/A') }}
+          {% endif %}
+          {% endfor %}
+          
+          Memory: {{ ansible_memtotal_mb }} MB
+          CPU Cores: {{ ansible_processor_cores }}
+          
+          Python Path: {{ ansible_python.executable }}
+          Python Version: {{ ansible_python.version.major }}.{{ ansible_python.version.minor }}.{{ ansible_python.version.micro }}
+        dest: "{{ evidence_dir }}/system_state.txt"
+      delegate_to: localhost
+
+    # Final Summary
+    - name: "Summary | Create preflight validation summary"
+      ansible.builtin.copy:
+        content: |
+          LiteLLM Pre-Flight Validation Summary
+          ====================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Target Host: {{ inventory_hostname }}
+          
+          VALIDATION RESULTS:
+          ✓ DNS Resolution: PASS
+          ✓ Network Configuration: PASS
+          ✓ Connectivity Tests: PASS
+          ✓ Domain Join Status: PASS
+          ✓ CA Trust Chain: PASS
+          ✓ Python 3.11 Runtime: PASS
+          
+          All pre-flight checks completed successfully.
+          Evidence saved to: {{ evidence_dir }}
+          
+          Ready to proceed with LiteLLM deployment.
+        dest: "{{ evidence_dir }}/validation_summary.txt"
+      delegate_to: localhost
+
+    - name: Display evidence location
+      ansible.builtin.debug:
+        msg: |
+          Pre-flight validation completed successfully!
+          Evidence saved to: {{ evidence_dir }}
+          
+          All checks PASSED - ready for LiteLLM deployment.

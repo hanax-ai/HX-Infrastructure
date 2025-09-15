@@ -1,0 +1,75 @@
+---
+# Validate webui_bind format before template rendering
+- name: Set default webui_bind if not defined
+  ansible.builtin.set_fact:
+    webui_bind_effective: "{{ webui_bind | default('0.0.0.0:8080') }}"
+
+- name: Validate webui_bind format
+  ansible.builtin.assert:
+    that:
+      - webui_bind_effective is defined
+      - webui_bind_effective is regex('^[^:]+:[0-9]+$')
+    fail_msg: "webui_bind must be in 'host:port' format (e.g., '0.0.0.0:8080')"
+
+- name: Extract host and port from webui_bind
+  ansible.builtin.set_fact:
+    webui_host: "{{ webui_bind_effective.split(':')[0] }}"
+    webui_port: "{{ webui_bind_effective.split(':')[1] }}"
+
+- name: Validate host is not empty
+  ansible.builtin.assert:
+    that:
+      - webui_host | length > 0
+    fail_msg: "Host part of webui_bind cannot be empty"
+
+- name: Validate port is numeric and in valid range
+  ansible.builtin.assert:
+    that:
+      - webui_port is regex('^[0-9]+$')
+      - webui_port | int >= 1
+      - webui_port | int <= 65535
+    fail_msg: "Port must be a number between 1 and 65535"
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: open-webui.service.j2
+    dest: /etc/systemd/system/open-webui.service
+    mode: '0644'
+  register: unit_tpl
+
+- name: daemon-reload when changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: unit_tpl.changed
+
+# Skip enable/start during dry-run to avoid “service not found” paradox
+- name: Enable + start service
+  ansible.builtin.systemd:
+    name: open-webui
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+# Graceful readiness wait: poll until fully active
+- name: Wait for open-webui to be active
+  ansible.builtin.command: systemctl is-active open-webui
+  register: svc_active
+  retries: 30
+  delay: 2
+  until: svc_active.stdout == "active"
+  changed_when: false
+  when: not ansible_check_mode
+
+# Helpful logs if readiness still fails
+- block:
+    - name: Trigger rescue when service fails to start
+      ansible.builtin.fail:
+        msg: "open-webui service failed to become active"
+  when: svc_active is failed
+  rescue:
+    - name: Show recent logs on failure
+      ansible.builtin.command: journalctl -u open-webui -n 80 --no-pager
+      register: svc_logs
+      changed_when: false
+    - debug:
+        msg: "{{ svc_logs.stdout }}"

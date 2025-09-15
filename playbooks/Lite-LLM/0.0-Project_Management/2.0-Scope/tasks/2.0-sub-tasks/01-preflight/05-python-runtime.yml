@@ -1,0 +1,152 @@
+---
+# Sub-task 01.05: Python Runtime Validation
+# Checks/installs Python 3.11 and pip
+# Dependencies: 04-ca-trust-validation.yml must pass
+# Precedence: Run after CA trust validation
+
+- name: "Python Runtime Validation and Setup"
+  hosts: hx-api-server
+  become: yes
+  gather_facts: yes
+  vars:
+    timestamp: "{{ hostvars['localhost']['timestamp'] | default(ansible_date_time.epoch) }}"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/api-preflight/{{ timestamp }}"
+    required_python_version: "3.11"
+    litellm_user: "litellm"
+    litellm_venv_path: "/home/litellm/litellm-venv"
+  
+  tasks:
+    - name: Create Python evidence directory
+      delegate_to: localhost
+      file:
+        path: "{{ evidence_dir }}/python"
+        state: directory
+        mode: '0755'
+    
+    - name: Check if Python 3.11 is installed
+      command: python3.11 --version
+      register: python_version
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Install Python 3.11 if not present
+      apt:
+        name:
+          - python3.11
+          - python3.11-venv
+          - python3.11-dev
+          - python3-pip
+        state: present
+        update_cache: yes
+      when: python_version.rc != 0
+      register: python_install
+    
+    - name: Verify Python 3.11 installation
+      command: python3.11 --version
+      register: python_verify
+      changed_when: false
+    
+    - name: Check pip installation
+      command: python3.11 -m pip --version
+      register: pip_version
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Install pip for Python 3.11 if needed
+      command: python3.11 -m ensurepip --upgrade
+      when: pip_version.rc != 0
+      register: pip_install
+    
+    - name: Check if litellm user exists
+      getent:
+        database: passwd
+        key: "{{ litellm_user }}"
+      register: litellm_user_check
+      ignore_errors: yes
+    
+    - name: Create litellm user if not exists
+      user:
+        name: "{{ litellm_user }}"
+        home: "/home/{{ litellm_user }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+      when: litellm_user_check.failed | default(false)
+    
+    - name: Check if virtual environment exists
+      stat:
+        path: "{{ litellm_venv_path }}"
+      register: venv_check
+    
+    - name: Create virtual environment for LiteLLM
+      command: python3.11 -m venv {{ litellm_venv_path }}
+      become_user: "{{ litellm_user }}"
+      when: not venv_check.stat.exists
+      register: venv_create
+    
+    - name: Get Python packages in system
+      shell: python3.11 -m pip list --format=json
+      register: system_packages
+      changed_when: false
+    
+    - name: Check virtual environment Python version
+      command: "{{ litellm_venv_path }}/bin/python --version"
+      register: venv_python_version
+      when: venv_check.stat.exists or venv_create.changed
+      changed_when: false
+    
+    - name: Get virtual environment packages
+      shell: "{{ litellm_venv_path }}/bin/pip list --format=json"
+      register: venv_packages
+      when: venv_check.stat.exists or venv_create.changed
+      become_user: "{{ litellm_user }}"
+      changed_when: false
+    
+    - name: Save Python runtime evidence
+      delegate_to: localhost
+      copy:
+        content: |
+          Python Runtime Validation Results
+          =================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+          
+          Python Installation:
+          - Required Version: {{ required_python_version }}
+          - Installed Version: {{ python_verify.stdout }}
+          - Installation Status: {{ 'Newly Installed' if python_install.changed | default(false) else 'Already Present' }}
+          
+          Pip Status:
+          - Version: {{ pip_version.stdout | default('Not installed initially') }}
+          - Installation Status: {{ 'Newly Installed' if pip_install.changed | default(false) else 'Already Present' }}
+          
+          LiteLLM User:
+          - Username: {{ litellm_user }}
+          - Exists: {{ 'YES' if not litellm_user_check.failed | default(false) else 'Created' }}
+          - Home: /home/{{ litellm_user }}
+          
+          Virtual Environment:
+          - Path: {{ litellm_venv_path }}
+          - Status: {{ 'Created' if venv_create.changed | default(false) else 'Already Exists' if venv_check.stat.exists else 'Not Created' }}
+          - Python Version: {{ venv_python_version.stdout | default('N/A') }}
+          
+          System Python Packages: {{ system_packages.stdout | from_json | length }}
+          Virtual Environment Packages: {{ venv_packages.stdout | default('[]') | from_json | length }}
+        dest: "{{ evidence_dir }}/python/validation_results.txt"
+    
+    - name: Save system packages list
+      delegate_to: localhost
+      copy:
+        content: "{{ system_packages.stdout | from_json | to_nice_yaml }}"
+        dest: "{{ evidence_dir }}/python/system_packages.yml"
+    
+    - name: Save venv packages list
+      delegate_to: localhost
+      copy:
+        content: "{{ venv_packages.stdout | default('[]') | from_json | to_nice_yaml }}"
+        dest: "{{ evidence_dir }}/python/venv_packages.yml"
+      when: venv_packages is defined
+    
+    - name: Display summary
+      debug:
+        msg: "Python runtime validation completed. Evidence saved to {{ evidence_dir }}/python/"

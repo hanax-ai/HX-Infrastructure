@@ -1,0 +1,303 @@
+---
+# Task 3.02 - Inventory and Group Vars Setup
+# Purpose: Prepare and validate Ansible inventory and group variables for LiteLLM deployment
+# This playbook manages inventory groups and variables, including both non-secret and secret parameters
+
+- name: LiteLLM Inventory and Group Variables Setup
+  hosts: localhost
+  gather_facts: no
+  tags:
+    - inventory
+    - setup
+  
+  vars:
+    ansible_base_dir: "{{ playbook_dir }}/../.."
+    inventory_file: "{{ ansible_base_dir }}/inventories/dev.ini"
+    group_vars_dir: "{{ ansible_base_dir }}/inventories/group_vars"
+    quarantine_dir: "{{ ansible_base_dir }}/_quarantine"
+    timestamp: "{{ ansible_date_time.epoch }}"
+    
+    # LiteLLM group configuration
+    litellm_group_hosts:
+      - "hx-api-server.dev-test.hana-x.ai"
+    
+    # Non-secret variables for group_vars/all/main.yml
+    litellm_config_vars:
+      # Bind / base URL
+      litellm_bind_host: "0.0.0.0"
+      litellm_bind_port: 4000
+      litellm_base_url: "http://hx-api-server.dev-test.hana-x.ai:4000"
+      
+      # Ollama backends (hostnames preferred over IPs)
+      litellm_backends:
+        - "http://hx-llm01-server.dev-test.hana-x.ai:11434"
+        - "http://hx-llm02-server.dev-test.hana-x.ai:11434"
+      
+      # Model alias map → Ollama models
+      litellm_models:
+        - name: "phi3-3.8b"
+          provider: "ollama"
+          model: "phi3:3.8b-mini-128k-instruct-q8_0"
+        - name: "llama3-8b"
+          provider: "ollama"
+          model: "llama3:8b-instruct-q8_0"
+
+  tasks:
+    # Section 1: Quarantine old vault files
+    - name: "Cleanup | Create quarantine directory"
+      ansible.builtin.file:
+        path: "{{ quarantine_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: "Cleanup | Find stray vault files to quarantine"
+      ansible.builtin.find:
+        paths: "{{ group_vars_dir }}/all"
+        patterns:
+          - "vault.yml.bad.*"
+          - "vault.yml.bak.*"
+          - "*.corrupted"
+          - "*.bak"
+        recurse: no
+      register: stray_vault_files
+
+    - name: "Cleanup | Quarantine stray vault files"
+      ansible.builtin.command:
+        cmd: "mv {{ item.path }} {{ quarantine_dir }}/{{ item.path | basename }}.{{ timestamp }}"
+      loop: "{{ stray_vault_files.files }}"
+      when: stray_vault_files.files | length > 0
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: "Cleanup | Report quarantined files"
+      ansible.builtin.debug:
+        msg: "Quarantined {{ stray_vault_files.files | length }} stray vault file(s) to {{ quarantine_dir }}"
+      when: stray_vault_files.files | length > 0
+
+    # Section 2: Validate existing inventory structure
+    - name: "Inventory | Check if inventory file exists"
+      ansible.builtin.stat:
+        path: "{{ inventory_file }}"
+      register: inventory_stat
+
+    - name: "Inventory | Assert inventory file exists"
+      ansible.builtin.assert:
+        that:
+          - inventory_stat.stat.exists
+        fail_msg: "Inventory file {{ inventory_file }} does not exist"
+        success_msg: "Inventory file found"
+
+    - name: "Inventory | Read current inventory"
+      ansible.builtin.slurp:
+        src: "{{ inventory_file }}"
+      register: current_inventory
+
+    - name: "Inventory | Check if litellm group already exists"
+      ansible.builtin.set_fact:
+        litellm_group_exists: "{{ '[litellm]' in (current_inventory.content | b64decode) }}"
+
+    # Section 3: Update inventory with litellm group
+    - name: "Inventory | Backup current inventory"
+      ansible.builtin.copy:
+        src: "{{ inventory_file }}"
+        dest: "{{ inventory_file }}.bak.{{ timestamp }}"
+        remote_src: yes
+      when: not litellm_group_exists
+
+    - name: "Inventory | Add litellm group to inventory"
+      ansible.builtin.blockinfile:
+        path: "{{ inventory_file }}"
+        block: |
+          
+          [litellm]
+          {% for host in litellm_group_hosts %}
+          {{ host }}
+          {% endfor %}
+        marker: "# {mark} LITELLM GROUP CONFIG"
+        create: no
+      when: not litellm_group_exists
+
+    - name: "Inventory | Report inventory status"
+      ansible.builtin.debug:
+        msg: |
+          {% if litellm_group_exists %}
+          LiteLLM group already exists in inventory
+          {% else %}
+          Added LiteLLM group to inventory with host: {{ litellm_group_hosts | join(', ') }}
+          {% endif %}
+
+    # Section 4: Update group_vars/all/main.yml
+    - name: "Group Vars | Check main.yml exists"
+      ansible.builtin.stat:
+        path: "{{ group_vars_dir }}/all/main.yml"
+      register: main_yml_stat
+
+    - name: "Group Vars | Assert main.yml exists"
+      ansible.builtin.assert:
+        that:
+          - main_yml_stat.stat.exists
+        fail_msg: "Group vars main.yml does not exist"
+        success_msg: "Group vars main.yml found"
+
+    - name: "Group Vars | Read current main.yml"
+      ansible.builtin.slurp:
+        src: "{{ group_vars_dir }}/all/main.yml"
+      register: current_main_yml
+
+    - name: "Group Vars | Check if LiteLLM vars already exist"
+      ansible.builtin.set_fact:
+        litellm_vars_exist: "{{ 'litellm_bind_host' in (current_main_yml.content | b64decode) }}"
+
+    - name: "Group Vars | Backup main.yml"
+      ansible.builtin.copy:
+        src: "{{ group_vars_dir }}/all/main.yml"
+        dest: "{{ group_vars_dir }}/all/main.yml.bak.{{ timestamp }}"
+        remote_src: yes
+      when: not litellm_vars_exist
+
+    - name: "Group Vars | Add LiteLLM configuration to main.yml"
+      ansible.builtin.blockinfile:
+        path: "{{ group_vars_dir }}/all/main.yml"
+        block: |
+          
+          # --- LiteLLM Proxy Configuration ---
+          # Bind / base URL
+          litellm_bind_host: "{{ litellm_config_vars.litellm_bind_host }}"
+          litellm_bind_port: {{ litellm_config_vars.litellm_bind_port }}
+          litellm_base_url: "{{ litellm_config_vars.litellm_base_url }}"
+          
+          # Ollama backends (hostnames preferred over IPs)
+          litellm_backends:
+          {% for backend in litellm_config_vars.litellm_backends %}
+            - "{{ backend }}"
+          {% endfor %}
+          
+          # Model alias map → Ollama models
+          litellm_models:
+          {% for model in litellm_config_vars.litellm_models %}
+            - name: "{{ model.name }}"
+              provider: "{{ model.provider }}"
+              model: "{{ model.model }}"
+          {% endfor %}
+        marker: "# {mark} LITELLM CONFIGURATION"
+        create: no
+      when: not litellm_vars_exist
+
+    # Section 5: Verify vault.yml structure
+    - name: "Vault | Check if vault.yml exists"
+      ansible.builtin.stat:
+        path: "{{ group_vars_dir }}/all/vault.yml"
+      register: vault_stat
+
+    - name: "Vault | Assert vault.yml exists"
+      ansible.builtin.assert:
+        that:
+          - vault_stat.stat.exists
+        fail_msg: |
+          Vault file does not exist. Please create it with:
+          ansible-vault create {{ group_vars_dir }}/all/vault.yml
+        success_msg: "Vault file found"
+
+    - name: "Vault | Check vault file is encrypted"
+      ansible.builtin.shell: |
+        head -1 "{{ group_vars_dir }}/all/vault.yml" | grep -q '$ANSIBLE_VAULT'
+      register: vault_encrypted
+      ignore_errors: yes
+      changed_when: false
+
+    - name: "Vault | Assert vault is encrypted"
+      ansible.builtin.assert:
+        that:
+          - vault_encrypted.rc == 0
+        fail_msg: "Vault file is not encrypted! Please encrypt it with ansible-vault"
+        success_msg: "Vault file is properly encrypted"
+
+    # Section 6: Provide instructions for vault variable
+    - name: "Vault | Display vault variable instructions"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          IMPORTANT: Manual vault update required
+          ============================================================
+          
+          Please add the following to your vault file:
+          
+          ansible-vault edit {{ group_vars_dir }}/all/vault.yml
+          
+          Then add:
+          ---
+          # LiteLLM master key for virtual key auth
+          litellm_master_key: "sk-YOUR-SECURE-MASTER-KEY-HERE"
+          
+          Generate a secure key with:
+          openssl rand -hex 32 | sed 's/^/sk-/'
+          
+          ============================================================
+
+    # Section 7: Validate all required variables
+    - name: "Validation | Create variable check list"
+      ansible.builtin.set_fact:
+        required_vars:
+          - litellm_bind_host
+          - litellm_bind_port
+          - litellm_base_url
+          - litellm_backends
+          - litellm_models
+
+    - name: "Validation | Read updated main.yml"
+      ansible.builtin.slurp:
+        src: "{{ group_vars_dir }}/all/main.yml"
+      register: final_main_yml
+
+    - name: "Validation | Check all required variables are present"
+      ansible.builtin.assert:
+        that:
+          - "item in (final_main_yml.content | b64decode)"
+        success_msg: "Variable {{ item }} is present"
+        fail_msg: "Required variable {{ item }} is missing"
+      loop: "{{ required_vars }}"
+
+    # Section 8: Summary report
+    - name: "Summary | Generate setup summary"
+      ansible.builtin.set_fact:
+        setup_summary: |
+          LiteLLM Inventory and Group Vars Setup Summary
+          ==============================================
+          
+          Inventory Updates:
+          - File: {{ inventory_file }}
+          - LiteLLM group: {% if litellm_group_exists %}Already existed{% else %}Added successfully{% endif %}
+          - Host: {{ litellm_group_hosts | join(', ') }}
+          
+          Group Variables:
+          - File: {{ group_vars_dir }}/all/main.yml
+          - LiteLLM vars: {% if litellm_vars_exist %}Already existed{% else %}Added successfully{% endif %}
+          - Variables configured:
+            * litellm_bind_host: {{ litellm_config_vars.litellm_bind_host }}
+            * litellm_bind_port: {{ litellm_config_vars.litellm_bind_port }}
+            * litellm_base_url: {{ litellm_config_vars.litellm_base_url }}
+            * Backends: {{ litellm_config_vars.litellm_backends | length }} configured
+            * Models: {{ litellm_config_vars.litellm_models | length }} configured
+          
+          Vault Status:
+          - File: {{ group_vars_dir }}/all/vault.yml
+          - Encrypted: {% if vault_encrypted.rc == 0 %}Yes{% else %}No{% endif %}
+          - Action Required: Add litellm_master_key to vault
+          
+          Cleanup:
+          - Quarantined files: {{ stray_vault_files.files | length }}
+          
+          Next Steps:
+          1. Update vault with litellm_master_key
+          2. Run role validation playbook
+          3. Deploy LiteLLM proxy
+
+    - name: "Summary | Display setup summary"
+      ansible.builtin.debug:
+        msg: "{{ setup_summary.split('\n') }}"
+
+    - name: "Summary | Save summary to file"
+      ansible.builtin.copy:
+        content: "{{ setup_summary }}"
+        dest: "{{ ansible_base_dir }}/.evidence/litellm_inventory_setup_{{ timestamp }}.txt"
+      delegate_to: localhost

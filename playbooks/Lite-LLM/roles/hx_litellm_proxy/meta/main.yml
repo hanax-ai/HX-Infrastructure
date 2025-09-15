@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  author: HX Infrastructure Team
+  description: LiteLLM OpenAI-compatible proxy for Ollama backends
+  company: HanaX AI
+  license: MIT
+  min_ansible_version: "2.10"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - focal
+  galaxy_tags:
+    - litellm
+    - proxy
+    - api
+    - gateway
+    - ollama
+    - openai
+
+dependencies: []

@@ -1,0 +1,137 @@
+---
+# Sub-task 01.04: CA Trust Chain Validation
+# Ensures HX Root CA is present and trusted
+# Dependencies: 03-domain-validation.yml must pass
+# Precedence: Run after domain validation
+
+- name: "CA Trust Chain Validation"
+  hosts: hx-api-server
+  become: yes
+  gather_facts: yes
+  vars:
+    timestamp: "{{ hostvars['localhost']['timestamp'] | default(ansible_date_time.epoch) }}"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/api-preflight/{{ timestamp }}"
+    ca_cert_name: "HX-ROOT-CA"
+    ca_cert_path: "/usr/local/share/ca-certificates/hx-root-ca.crt"
+    ca_server: "hx-ca-server.dev-test.hana-x.ai"
+  
+  tasks:
+    - name: Create CA evidence directory
+      delegate_to: localhost
+      file:
+        path: "{{ evidence_dir }}/ca-trust"
+        state: directory
+        mode: '0755'
+    
+    - name: Check if HX Root CA certificate exists
+      stat:
+        path: "{{ ca_cert_path }}"
+      register: ca_cert_file
+    
+    - name: Validate CA certificate exists
+      assert:
+        that:
+          - ca_cert_file.stat.exists
+          - ca_cert_file.stat.size > 0
+        fail_msg: "HX Root CA certificate not found at {{ ca_cert_path }}"
+        success_msg: "HX Root CA certificate found"
+    
+    - name: Get CA certificate details
+      shell: |
+        openssl x509 -in {{ ca_cert_path }} -noout -subject -issuer -dates -fingerprint
+      register: ca_cert_details
+      when: ca_cert_file.stat.exists
+      changed_when: false
+    
+    - name: Extract CA certificate expiration date
+      shell: |
+        openssl x509 -in {{ ca_cert_path }} -noout -enddate
+      register: ca_expiration
+      when: ca_cert_file.stat.exists
+      changed_when: false
+    
+    - name: Check if CA is in system trust store
+      shell: |
+        trust list | grep -i "{{ ca_cert_name }}" || true
+      register: trust_store_check
+      changed_when: false
+    
+    - name: Verify CA certificate validity
+      shell: |
+        openssl x509 -in {{ ca_cert_path }} -noout -checkend 86400
+      register: ca_validity
+      when: ca_cert_file.stat.exists
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Test TLS connection to CA server
+      shell: |
+        echo | openssl s_client -connect {{ ca_server }}:443 -showcerts 2>/dev/null | \
+        openssl x509 -noout -subject -issuer
+      register: ca_server_cert
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Check update-ca-certificates configuration
+      command: grep -E "^[^#].*hx-root-ca" /etc/ca-certificates.conf
+      register: ca_certificates_conf
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: List all trusted CAs
+      shell: |
+        find /etc/ssl/certs -name "*.pem" -o -name "*.crt" | \
+        xargs -I {} basename {} | sort | uniq
+      register: trusted_cas
+      changed_when: false
+    
+    - name: Save CA trust evidence
+      delegate_to: localhost
+      copy:
+        content: |
+          CA Trust Chain Validation Results
+          =================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+          
+          HX Root CA Status:
+          - Certificate Present: {{ 'YES' if ca_cert_file.stat.exists else 'NO' }}
+          - Path: {{ ca_cert_path }}
+          - Size: {{ ca_cert_file.stat.size | default(0) }} bytes
+          - In Trust Store: {{ 'YES' if ca_cert_name in trust_store_check.stdout else 'NO' }}
+          - Valid: {{ 'YES' if ca_validity.rc | default(1) == 0 else 'NO' }}
+          
+          Certificate Details:
+          {{ ca_cert_details.stdout | default('Certificate not found') | indent(2) }}
+          
+          Expiration Date:
+          {{ ca_expiration.stdout | default('Unable to retrieve expiration date') | indent(2) }}
+          
+          CA Server Connection Test ({{ ca_server }}):
+          {{ ca_server_cert.stdout | default('Connection failed') | indent(2) }}
+          
+          CA Certificates Configuration:
+          {{ 'Configured' if ca_certificates_conf.rc == 0 else 'Not configured in /etc/ca-certificates.conf' }}
+          
+          Total Trusted CAs: {{ trusted_cas.stdout_lines | length }}
+        dest: "{{ evidence_dir }}/ca-trust/validation_results.txt"
+    
+    - name: Copy CA certificate for evidence
+      fetch:
+        src: "{{ ca_cert_path }}"
+        dest: "{{ evidence_dir }}/ca-trust/hx-root-ca.crt"
+        flat: yes
+      when: ca_cert_file.stat.exists
+    
+    - name: Save list of all trusted CAs
+      delegate_to: localhost
+      copy:
+        content: |
+          All Trusted Certificate Authorities
+          ===================================
+          {{ trusted_cas.stdout }}
+        dest: "{{ evidence_dir }}/ca-trust/all_trusted_cas.txt"
+    
+    - name: Display summary
+      debug:
+        msg: "CA trust validation completed. Evidence saved to {{ evidence_dir }}/ca-trust/"

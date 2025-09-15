@@ -1,0 +1,290 @@
+---
+# Sub-task 03.04: Document Template and Variable Issues
+# Documents any missing variables or template issues found
+# Dependencies: 03-render-templates.yml must complete
+# Precedence: Final task in role validation sequence
+
+- name: "Document Template and Variable Issues"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    evidence_base_dir: "{{ playbook_dir }}/../../../../../.evidence/litellm_role_validation"
+    role_base_dir: "{{ playbook_dir }}/../../../roles/hx_litellm_proxy"
+    ansible_base_dir: "{{ playbook_dir }}/../../../../.."
+    timestamp: "{{ ansible_date_time.epoch }}"
+  
+  tasks:
+    - name: Find latest evidence directory
+      find:
+        paths: "{{ evidence_base_dir }}"
+        file_type: directory
+        recurse: no
+      register: evidence_dirs
+      when: evidence_base_dir is exists
+    
+    - name: Set latest evidence directory
+      set_fact:
+        latest_evidence_dir: "{{ (evidence_dirs.files | sort(attribute='mtime', reverse=True) | first).path | default(evidence_base_dir + '/' + timestamp) }}"
+    
+    - name: Create issues directory
+      file:
+        path: "{{ latest_evidence_dir }}/issues"
+        state: directory
+        mode: '0755'
+    
+    - name: Check for render validation report
+      stat:
+        path: "{{ latest_evidence_dir }}/render_validation_report.txt"
+      register: render_report
+    
+    - name: Analyze rendered templates for issues
+      shell: |
+        set -e
+        set -o pipefail
+        
+        # Initialize analysis file
+        ANALYSIS_FILE="{{ latest_evidence_dir }}/issues/analysis.txt"
+        echo "=== Analyzing template issues ===" > "$ANALYSIS_FILE"
+        touch "$ANALYSIS_FILE"
+        
+        # Check for YAML and ENV files
+        YAML_FILES=()
+        ENV_FILES=()
+        if ls {{ latest_evidence_dir }}/*.yaml >/dev/null 2>&1; then
+          YAML_FILES=({{ latest_evidence_dir }}/*.yaml)
+        fi
+        if ls {{ latest_evidence_dir }}/*.env >/dev/null 2>&1; then
+          ENV_FILES=({{ latest_evidence_dir }}/*.env)
+        fi
+        
+        # Check for undefined variables
+        if [ ${#YAML_FILES[@]} -gt 0 ] || [ ${#ENV_FILES[@]} -gt 0 ]; then
+          echo "" >> "$ANALYSIS_FILE"
+          echo "Checking for undefined variables..." >> "$ANALYSIS_FILE"
+          grep -r "undefined\|UNDEFINED\|error" "${YAML_FILES[@]}" "${ENV_FILES[@]}" 2>/dev/null | \
+          while IFS= read -r line; do
+            echo "UNDEFINED VARIABLE: $line" >> "$ANALYSIS_FILE"
+          done || true
+        fi
+        
+        # Check for empty values in YAML files only
+        if [ ${#YAML_FILES[@]} -gt 0 ]; then
+          echo "" >> "$ANALYSIS_FILE"
+          echo "Checking for empty values..." >> "$ANALYSIS_FILE"
+          grep -E ":\s*$|:\s*''\s*$|:\s*\"\"\s*$" "${YAML_FILES[@]}" 2>/dev/null | \
+          while IFS= read -r line; do
+            echo "EMPTY VALUE: $line" >> "$ANALYSIS_FILE"
+          done || true
+        fi
+        
+        # Check for placeholder values
+        if [ ${#YAML_FILES[@]} -gt 0 ] || [ ${#ENV_FILES[@]} -gt 0 ]; then
+          echo "" >> "$ANALYSIS_FILE"
+          echo "Checking for placeholder values..." >> "$ANALYSIS_FILE"
+          grep -i "REPLACE\|TODO\|FIXME\|XXX" "${YAML_FILES[@]}" "${ENV_FILES[@]}" 2>/dev/null | \
+          while IFS= read -r line; do
+            echo "PLACEHOLDER: $line" >> "$ANALYSIS_FILE"
+          done || true
+        fi
+        
+        # Output results
+        echo "" >> "$ANALYSIS_FILE"
+        echo "=== Analysis Complete ===" >> "$ANALYSIS_FILE"
+        cat "$ANALYSIS_FILE"
+      register: issue_analysis
+      changed_when: false
+    
+    - name: Check group_vars for missing LiteLLM variables
+      shell: |
+        set -e
+        set -o pipefail
+        
+        # Ensure temp directory exists
+        TEMP_DIR="/tmp/litellm_validation_$$"
+        mkdir -p "$TEMP_DIR"
+        trap "rm -rf $TEMP_DIR" EXIT
+        
+        # Get all variables used in templates
+        TEMPLATE_VARS="$TEMP_DIR/template_vars.txt"
+        DEFINED_VARS="$TEMP_DIR/defined_vars.txt"
+        
+        # Check if template files exist
+        if ls {{ role_base_dir }}/templates/*.j2 >/dev/null 2>&1; then
+          grep -hoE '\{\{\s*[a-zA-Z_][a-zA-Z0-9_]*' {{ role_base_dir }}/templates/*.j2 | \
+          sed 's/{{[[:space:]]*//' | sort | uniq > "$TEMPLATE_VARS"
+        else
+          echo "Warning: No template files found in {{ role_base_dir }}/templates/" >&2
+          touch "$TEMPLATE_VARS"
+        fi
+        
+        # Get defined variables with error handling
+        if [ -f "{{ ansible_base_dir }}/inventories/group_vars/all/main.yml" ]; then
+          python3 -c "
+import sys
+import yaml
+try:
+    with open('{{ ansible_base_dir }}/inventories/group_vars/all/main.yml') as f:
+        vars = yaml.safe_load(f) or {}
+        for var in vars.keys():
+            if var.startswith('litellm_'):
+                print(var)
+except Exception as e:
+    print(f'Error reading group_vars: {e}', file=sys.stderr)
+    sys.exit(1)
+          " > "$DEFINED_VARS" 2>&1 || {
+            echo "Error: Failed to parse group_vars file" >&2
+            touch "$DEFINED_VARS"
+          }
+        else
+          echo "Warning: group_vars file not found at {{ ansible_base_dir }}/inventories/group_vars/all/main.yml" >&2
+          touch "$DEFINED_VARS"
+        fi
+        
+        # Find missing variables
+        if [ -s "$TEMPLATE_VARS" ]; then
+          comm -23 <(grep '^litellm_' "$TEMPLATE_VARS" 2>/dev/null | sort) <(sort "$DEFINED_VARS") || true
+        fi
+      register: missing_vars
+      changed_when: false
+    
+    - name: Generate remediation script
+      copy:
+        content: |
+          #!/bin/bash
+          # LiteLLM Role Validation Remediation Script
+          # Generated: {{ ansible_date_time.iso8601 }}
+          
+          echo "Starting LiteLLM role validation remediation..."
+          
+          # Missing Variables Found:
+          {% if missing_vars.stdout %}
+          echo "=== Missing Variables ==="
+          {% for var in missing_vars.stdout_lines %}
+          echo "- {{ var }}"
+          {% endfor %}
+          
+          echo ""
+          echo "To fix missing variables, add them to:"
+          echo "{{ ansible_base_dir }}/inventories/group_vars/all/main.yml"
+          echo ""
+          echo "Example additions:"
+          {% for var in missing_vars.stdout_lines %}
+          echo "{{ var }}: \"<value>\""
+          {% endfor %}
+          {% else %}
+          echo "No missing variables found."
+          {% endif %}
+          
+          # Template Issues:
+          {% if 'UNDEFINED' in issue_analysis.stdout or 'EMPTY' in issue_analysis.stdout %}
+          echo ""
+          echo "=== Template Issues Found ==="
+          echo "Review: {{ latest_evidence_dir }}/issues/analysis.txt"
+          {% endif %}
+          
+          # Recommended Actions:
+          echo ""
+          echo "=== Recommended Actions ==="
+          echo "1. Review and fix any missing variables"
+          echo "2. Ensure vault.yml contains litellm_master_key"
+          echo "3. Validate all model configurations match Ollama"
+          echo "4. Re-run validation after fixes"
+          
+          # Quick validation command:
+          echo ""
+          echo "To re-validate after fixes:"
+          echo "ansible-playbook {{ playbook_dir }}/04-document-issues.yml"
+        dest: "{{ latest_evidence_dir }}/issues/remediation.sh"
+        mode: '0755'
+    
+    - name: Create comprehensive issues report
+      copy:
+        content: |
+          LiteLLM Role Validation Issues Report
+          =====================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Evidence Directory: {{ latest_evidence_dir }}
+          
+          Summary
+          -------
+          Missing Variables: {{ missing_vars.stdout_lines | length }}
+          Template Issues: {{ 'YES' if ('UNDEFINED' in issue_analysis.stdout or 'EMPTY' in issue_analysis.stdout) else 'NO' }}
+          Placeholder Values: {{ 'YES' if 'PLACEHOLDER' in issue_analysis.stdout else 'NO' }}
+          
+          Missing Variables Detail
+          ------------------------
+          {% if missing_vars.stdout %}
+          The following variables are used in templates but not defined:
+          {% for var in missing_vars.stdout_lines %}
+          - {{ var }}
+          {% endfor %}
+          {% else %}
+          All template variables are defined.
+          {% endif %}
+          
+          Template Analysis
+          -----------------
+          {{ issue_analysis.stdout | default('No issues found in template analysis') }}
+          
+          File Locations
+          --------------
+          - Templates: {{ role_base_dir }}/templates/
+          - Group Vars: {{ ansible_base_dir }}/inventories/group_vars/all/main.yml
+          - Vault: {{ ansible_base_dir }}/inventories/group_vars/all/vault.yml
+          - Rendered Configs: {{ latest_evidence_dir }}/
+          
+          Resolution Steps
+          ----------------
+          {% if missing_vars.stdout_lines | length > 0 %}
+          1. Add missing variables to group_vars/all/main.yml:
+          {% for var in missing_vars.stdout_lines %}
+             {{ var }}: "<appropriate_value>"
+          {% endfor %}
+          {% endif %}
+          
+          2. Ensure vault contains:
+             litellm_master_key: "sk-<64-character-hex-string>"
+          
+          3. Verify model names match Ollama exactly:
+             - Use 'ollama list' on backend servers
+             - Update model names in group_vars if needed
+          
+          4. Run validation again:
+             ansible-playbook {{ playbook_dir }}/../../../{{ playbook_dir | basename }}.yml
+          
+          Validation Checklist
+          --------------------
+          [ ] All variables defined in group_vars
+          [ ] Vault encrypted with master key
+          [ ] Templates render without errors
+          [ ] No undefined variables in output
+          [ ] No empty required values
+          [ ] No placeholder values remain
+          [ ] YAML syntax is valid
+          [ ] Model configurations correct
+          
+          Next Steps
+          ----------
+          {% if missing_vars.stdout_lines | length == 0 and 'UNDEFINED' not in issue_analysis.stdout %}
+          ✓ Role validation complete - ready for deployment
+          → Run the main deployment playbook
+          {% else %}
+          ✗ Fix the issues documented above
+          → Re-run this validation after fixes
+          {% endif %}
+        dest: "{{ latest_evidence_dir }}/issues/full_report.txt"
+    
+    - name: Display summary
+      debug:
+        msg:
+          - "Role validation issue documentation completed"
+          - "Evidence directory: {{ latest_evidence_dir }}"
+          - "Missing variables: {{ missing_vars.stdout_lines | length }}"
+          - "Issues found: {{ 'YES' if ('UNDEFINED' in issue_analysis.stdout or missing_vars.stdout) else 'NO' }}"
+          - ""
+          - "Reports generated:"
+          - "- Full report: {{ latest_evidence_dir }}/issues/full_report.txt"
+          - "- Analysis: {{ latest_evidence_dir }}/issues/analysis.txt"
+          - "- Remediation script: {{ latest_evidence_dir }}/issues/remediation.sh"
+          - ""
+          - "{% if missing_vars.stdout_lines | length == 0 %}✓ Ready for deployment{% else %}✗ Fix issues before deployment{% endif %}"

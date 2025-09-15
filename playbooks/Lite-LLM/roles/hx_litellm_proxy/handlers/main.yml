@@ -1,0 +1,32 @@
+---
+# Handlers for hx_litellm_proxy role
+
+- name: restart litellm
+  ansible.builtin.systemd:
+    name: "{{ litellm_service_name }}"
+    state: restarted
+    daemon_reload: yes
+  become: yes
+
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: yes
+  become: yes
+
+- name: reload litellm config
+  ansible.builtin.systemd:
+    name: "{{ litellm_service_name }}"
+    state: reloaded
+  become: yes
+  ignore_errors: yes  # Service might not support reload
+
+- name: validate litellm config
+  ansible.builtin.shell: |
+    {{ litellm_venv_path }}/bin/python -c "
+    import yaml
+    with open('{{ litellm_config_dir }}/config.yaml') as f:
+        config = yaml.safe_load(f)
+    print('Config validation: OK')
+    "
+  become: yes
+  become_user: "{{ litellm_user }}"

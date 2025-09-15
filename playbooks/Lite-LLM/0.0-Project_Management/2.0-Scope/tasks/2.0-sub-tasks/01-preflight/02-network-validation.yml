@@ -1,0 +1,121 @@
+---
+# Sub-task 01.02: Network Configuration Validation
+# Validates netplan config, resolver, and network posture
+# Dependencies: 01-dns-resolution.yml must pass
+# Precedence: Run after DNS resolution check
+
+- name: "Network Configuration Validation"
+  hosts: hx-api-server
+  become: yes
+  gather_facts: yes
+  vars:
+    timestamp: "{{ hostvars['localhost']['timestamp'] | default(ansible_date_time.epoch) }}"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/api-preflight/{{ timestamp }}"
+    required_ports:
+      - { port: 22, proto: tcp, service: "SSH" }
+      - { port: 4000, proto: tcp, service: "LiteLLM API" }
+    backend_ports:
+      - { host: "hx-llm01-server.dev-test.hana-x.ai", port: 11434, service: "Ollama" }
+      - { host: "hx-llm02-server.dev-test.hana-x.ai", port: 11434, service: "Ollama" }
+  
+  tasks:
+    - name: Create network evidence directory
+      delegate_to: localhost
+      file:
+        path: "{{ evidence_dir }}/network"
+        state: directory
+        mode: '0755'
+    
+    - name: Check netplan configuration exists
+      stat:
+        path: /etc/netplan/50-hx-static.yaml
+      register: netplan_config
+    
+    - name: Validate netplan configuration
+      command: netplan --debug generate
+      register: netplan_validate
+      when: netplan_config.stat.exists
+      changed_when: false
+    
+    - name: Get current network interfaces
+      command: ip -j addr show
+      register: network_interfaces
+      changed_when: false
+    
+    - name: Check resolver configuration
+      slurp:
+        src: /etc/resolv.conf
+      register: resolv_conf
+    
+    - name: Validate DNS servers in resolv.conf
+      assert:
+        that:
+          - "'nameserver' in (resolv_conf.content | b64decode)"
+          - "'search dev-test.hana-x.ai' in (resolv_conf.content | b64decode)"
+        fail_msg: "DNS resolver not properly configured"
+        success_msg: "DNS resolver configuration valid"
+    
+    - name: Test connectivity to backends
+      wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        timeout: 10
+        state: started
+      loop: "{{ backend_ports }}"
+      register: backend_connectivity
+    
+    - name: Check if required ports are available
+      wait_for:
+        port: "{{ item.port }}"
+        state: stopped
+        timeout: 5
+      loop: "{{ required_ports }}"
+      register: port_availability
+      ignore_errors: yes
+    
+    - name: Get current firewall rules
+      command: iptables -L -n -v
+      register: firewall_rules
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Save network evidence
+      delegate_to: localhost
+      copy:
+        content: |
+          Network Configuration Validation Results
+          ========================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+          
+          Netplan Configuration:
+          - Exists: {{ netplan_config.stat.exists }}
+          - Validation: {{ 'PASSED' if netplan_validate.rc | default(1) == 0 else 'FAILED' }}
+          
+          DNS Configuration:
+          {{ resolv_conf.content | b64decode | indent(2) }}
+          
+          Network Interfaces:
+          {{ network_interfaces.stdout | from_json | to_nice_yaml | indent(2) }}
+          
+          Backend Connectivity:
+          {% for result in backend_connectivity.results %}
+          - {{ result.item.host }}:{{ result.item.port }} ({{ result.item.service }}): {{ 'OK' if (result is defined and not result.failed|default(false)) else 'FAILED' }}
+          {% endfor %}
+          
+          Port Availability:
+          {% for result in port_availability.results %}
+          - Port {{ result.item.port }} ({{ result.item.service }}): {{ 'Available' if (result is defined and not result.failed|default(false)) else 'In Use' }}
+          {% endfor %}
+        dest: "{{ evidence_dir }}/network/validation_results.txt"
+    
+    - name: Save firewall rules
+      delegate_to: localhost
+      copy:
+        content: "{{ firewall_rules.stdout | default('No firewall rules found') }}"
+        dest: "{{ evidence_dir }}/network/firewall_rules.txt"
+      when: firewall_rules is defined
+    
+    - name: Display summary
+      debug:
+        msg: "Network validation completed. Evidence saved to {{ evidence_dir }}/network/"

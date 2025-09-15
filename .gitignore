@@ -21,6 +21,14 @@ __pycache__/
 vault.pass
 vault_pass.txt
 
+# backup files
+*.bak
+*.bak.*
+*.backup
+*~
+.backup/
+backups/
+
 # local tmp
 tmp/
 x-archive/

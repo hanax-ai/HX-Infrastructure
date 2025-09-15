@@ -1,0 +1,142 @@
+---
+# Sub-task 01.03: Domain Join and Privileges Validation
+# Confirms domain join and sudo privileges for agent0
+# Dependencies: 02-network-validation.yml must pass
+# Precedence: Run after network validation
+
+- name: "Domain Join and Privileges Validation"
+  hosts: hx-api-server
+  become: yes
+  gather_facts: yes
+  vars:
+    timestamp: "{{ hostvars['localhost']['timestamp'] | default(ansible_date_time.epoch) }}"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/api-preflight/{{ timestamp }}"
+    required_user: agent0
+    domain_suffix: dev-test.hana-x.ai
+  
+  tasks:
+    - name: Create domain evidence directory
+      delegate_to: localhost
+      file:
+        path: "{{ evidence_dir }}/domain"
+        state: directory
+        mode: '0755'
+    
+    - name: Check if system is domain joined
+      command: realm list
+      register: realm_status
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Validate domain membership
+      assert:
+        that:
+          - realm_status.rc == 0
+          - domain_suffix in realm_status.stdout
+        fail_msg: "System is not properly domain joined"
+        success_msg: "System is domain joined to {{ domain_suffix }}"
+      when: realm_status.rc == 0
+    
+    - name: Check SSSD service status
+      systemd:
+        name: sssd
+        state: started
+      register: sssd_status
+      check_mode: yes
+    
+    - name: Verify agent0 user exists
+      getent:
+        database: passwd
+        key: "{{ required_user }}"
+      register: agent0_user
+    
+    - name: Check agent0 sudo privileges
+      command: "sudo -l -U {{ required_user }}"
+      register: sudo_check
+      changed_when: false
+    
+    - name: Validate sudo access
+      assert:
+        that:
+          - "'ALL' in sudo_check.stdout or 'NOPASSWD' in sudo_check.stdout"
+        fail_msg: "User {{ required_user }} does not have proper sudo privileges"
+        success_msg: "User {{ required_user }} has valid sudo privileges"
+    
+    - name: Get Kerberos ticket info
+      command: klist
+      register: kerberos_tickets
+      changed_when: false
+      ignore_errors: yes
+      become_user: "{{ required_user }}"
+    
+    - name: Read PAM configuration file
+      ansible.builtin.slurp:
+        src: /etc/pam.d/common-auth
+      register: pam_file_content
+      ignore_errors: yes
+    
+    - name: Check PAM configuration
+      ansible.builtin.set_fact:
+        pam_config:
+          stdout: "{{ pam_file_content.content | b64decode | regex_findall('.*(?:pam_sss|pam_krb5).*') | join('\n') }}"
+          rc: "{{ 0 if pam_file_content.content | default('') | b64decode | regex_search('pam_sss|pam_krb5') else 1 }}"
+      when: pam_file_content is not failed
+      changed_when: false
+    
+    - name: Set PAM configuration failure state
+      ansible.builtin.set_fact:
+        pam_config:
+          stdout: ""
+          rc: 1
+          msg: "Could not read /etc/pam.d/common-auth"
+      when: pam_file_content is failed
+      changed_when: false
+    
+    - name: Get domain controller connectivity
+      command: "dig +short _ldap._tcp.{{ domain_suffix }} SRV"
+      register: dc_srv_records
+      changed_when: false
+    
+    - name: Save domain validation evidence
+      delegate_to: localhost
+      copy:
+        content: |
+          Domain Join and Privileges Validation Results
+          =============================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+          
+          Domain Status:
+          - Joined: {{ 'YES' if realm_status.rc == 0 else 'NO' }}
+          - Domain: {{ domain_suffix }}
+          - SSSD Service: {{ 'Running' if sssd_status.changed == false else 'Not Running' }}
+          
+          User Validation:
+          - User: {{ required_user }}
+          - Exists: {{ 'YES' if agent0_user is defined and agent0_user.ansible_facts is defined and agent0_user.ansible_facts.getent_passwd is defined and required_user in agent0_user.ansible_facts.getent_passwd else 'NO' }}
+          - UID: {{ agent0_user.ansible_facts.getent_passwd[required_user][1] if (agent0_user is defined and agent0_user.ansible_facts is defined and agent0_user.ansible_facts.getent_passwd is defined and required_user in agent0_user.ansible_facts.getent_passwd) else 'N/A' }}
+          - GID: {{ agent0_user.ansible_facts.getent_passwd[required_user][2] if (agent0_user is defined and agent0_user.ansible_facts is defined and agent0_user.ansible_facts.getent_passwd is defined and required_user in agent0_user.ansible_facts.getent_passwd) else 'N/A' }}
+          
+          Sudo Privileges:
+          {{ sudo_check.stdout | indent(2) }}
+          
+          Kerberos Status:
+          {{ kerberos_tickets.stdout | default('No active tickets') | indent(2) }}
+          
+          PAM Configuration:
+          {{ 'SSS/Kerberos authentication configured' if pam_config.rc == 0 else 'PAM not configured for domain auth' }}
+          
+          Domain Controllers:
+          {{ dc_srv_records.stdout | default('No SRV records found') | indent(2) }}
+        dest: "{{ evidence_dir }}/domain/validation_results.txt"
+    
+    - name: Save realm details
+      delegate_to: localhost
+      copy:
+        content: "{{ realm_status.stdout | default('Realm not configured') }}"
+        dest: "{{ evidence_dir }}/domain/realm_status.txt"
+      when: realm_status is defined
+    
+    - name: Display summary
+      debug:
+        msg: "Domain validation completed. Evidence saved to {{ evidence_dir }}/domain/"

@@ -1,0 +1,38 @@
+---
+- name: Install required packages for domain join
+  ansible.builtin.apt:
+    name:
+      - realmd
+      - sssd
+      - sssd-tools
+      - adcli
+      - krb5-user
+      - packagekit
+    state: present
+    update_cache: true
+
+- name: Discover the realm
+  ansible.builtin.command: realm discover {{ ad_domain }}
+  register: realm_discover
+  changed_when: >
+    realm_discover.rc == 0 and
+    (realm_discover.stdout_lines | select('match', '^domain-name:') | list | length > 0)
+  failed_when: realm_discover.rc != 0
+
+
+- name: Check if already joined to domain
+  ansible.builtin.command: realm list
+  register: realm_status
+  changed_when: false
+  failed_when: false
+
+- name: Join the server to the realm
+  ansible.builtin.command: >
+    realm join --verbose {{ ad_domain }}
+    --user={{ ad_admin_user }}
+  args:
+    stdin: "{{ ad_admin_password }}"
+  changed_when: true
+  failed_when: false
+  no_log: true
+  when: ad_domain not in (realm_status.stdout | default(''))

@@ -1,0 +1,214 @@
+---
+# Sub-task 02.05: Validate All Required Variables
+# Ensures all required variables are present and valid
+# Dependencies: Previous inventory tasks (01-04) must complete
+# Precedence: Final task in inventory setup sequence
+
+- name: "Validate All Required Variables"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    ansible_base_dir: "{{ playbook_dir }}/../../../.."
+    required_vars:
+      - name: litellm_bind_host
+        type: string
+        valid_values: ['0.0.0.0', '127.0.0.1']
+        location: group_vars/all/main.yml
+      - name: litellm_bind_port
+        type: integer
+        min: 1024
+        max: 65535
+        location: group_vars/all/main.yml
+      - name: litellm_backends
+        type: list
+        min_items: 1
+        location: group_vars/all/main.yml
+      - name: litellm_models
+        type: list
+        min_items: 1
+        location: group_vars/all/main.yml
+      - name: litellm_routing_strategy
+        type: string
+        valid_values: ['least-busy', 'round-robin', 'random']
+        location: group_vars/all/main.yml
+      - name: litellm_debug
+        type: boolean
+        location: group_vars/all/main.yml
+      - name: litellm_log_level
+        type: string
+        valid_values: ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+        location: group_vars/all/main.yml
+      - name: litellm_master_key
+        type: string
+        pattern: '^sk-[a-fA-F0-9]{64}$'
+        location: group_vars/all/vault.yml
+        encrypted: yes
+  
+  tasks:
+    - name: Load main group variables
+      include_vars:
+        file: "{{ ansible_base_dir }}/inventories/group_vars/all/main.yml"
+        name: main_vars
+      register: main_vars_loaded
+    
+    - name: Check if vault exists and is encrypted
+      stat:
+        path: "{{ ansible_base_dir }}/inventories/group_vars/all/vault.yml"
+      register: vault_stat
+    
+    - name: Check if vault is encrypted
+      shell: head -1 {{ ansible_base_dir }}/inventories/group_vars/all/vault.yml | grep -q "ANSIBLE_VAULT"
+      register: vault_encrypted
+      when: vault_stat.stat.exists
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Initialize validation results
+      set_fact:
+        validation_results: []
+        validation_passed: true
+    
+    - name: Filter non-encrypted variables by type
+      set_fact:
+        string_vars: "{{ required_vars | selectattr('type', 'equalto', 'string') | rejectattr('encrypted', 'true') | list }}"
+        integer_vars: "{{ required_vars | selectattr('type', 'equalto', 'integer') | rejectattr('encrypted', 'true') | list }}"
+        boolean_vars: "{{ required_vars | selectattr('type', 'equalto', 'boolean') | rejectattr('encrypted', 'true') | list }}"
+        list_vars: "{{ required_vars | selectattr('type', 'equalto', 'list') | rejectattr('encrypted', 'true') | list }}"
+    
+    - name: Validate string variables
+      include_tasks: validation_tasks/validate_string_var.yml
+      vars:
+        var_config: "{{ item }}"
+      loop: "{{ string_vars }}"
+      when: string_vars | length > 0
+    
+    - name: Validate integer variables
+      include_tasks: validation_tasks/validate_integer_var.yml
+      vars:
+        var_config: "{{ item }}"
+      loop: "{{ integer_vars }}"
+      when: integer_vars | length > 0
+    
+    - name: Validate boolean variables
+      include_tasks: validation_tasks/validate_boolean_var.yml
+      vars:
+        var_config: "{{ item }}"
+      loop: "{{ boolean_vars }}"
+      when: boolean_vars | length > 0
+    
+    - name: Validate list variables
+      include_tasks: validation_tasks/validate_list_var.yml
+      vars:
+        var_config: "{{ item }}"
+      loop: "{{ list_vars }}"
+      when: list_vars | length > 0
+    
+    - name: Validate vault variables (without decrypting)
+      set_fact:
+        vault_validation:
+          name: "{{ item.name }}"
+          location: "{{ item.location }}"
+          vault_exists: "{{ vault_stat.stat.exists }}"
+          vault_encrypted: "{{ vault_encrypted.rc | default(1) == 0 }}"
+          message: >-
+            {% if not vault_stat.stat.exists %}Vault file does not exist
+            {% elif vault_encrypted.rc | default(1) != 0 %}Vault file is not encrypted
+            {% else %}Vault exists and is encrypted (manual verification required){% endif %}
+      loop: "{{ required_vars | selectattr('encrypted', 'true') | list }}"
+      register: vault_validations
+    
+    - name: Create validation report
+      copy:
+        content: |
+          LiteLLM Variable Validation Report
+          ==================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          
+          Overall Status: {{ 'PASSED' if validation_passed and vault_stat.stat.exists and vault_encrypted.rc | default(1) == 0 else 'FAILED' }}
+          
+          Variable Validation Results
+          ---------------------------
+          {% for result in validation_results %}
+          {{ result.name }}:
+            Location: {{ result.location }}
+            Found: {{ 'YES' if result.found else 'NO' }}
+            Valid: {{ 'YES' if result.valid else 'NO' }}
+            {% if result.found %}Value: {{ result.value | to_json }}{% endif %}
+            Status: {{ result.message }}
+          
+          {% endfor %}
+          
+          Vault Variables
+          ---------------
+          {% for vault_var in vault_validations.results | default([]) %}
+          {{ vault_var.set_fact.name }}:
+            Location: {{ vault_var.set_fact.location }}
+            Vault Exists: {{ 'YES' if vault_var.set_fact.vault_exists else 'NO' }}
+            Vault Encrypted: {{ 'YES' if vault_var.set_fact.vault_encrypted else 'NO' }}
+            Status: {{ vault_var.set_fact.message }}
+          {% endfor %}
+          
+          Model Configuration
+          -------------------
+          {% if 'litellm_models' in main_vars %}
+          Total Models: {{ main_vars.litellm_models | length }}
+          {% for model in main_vars.litellm_models %}
+          - Alias: {{ model.name }}
+            Provider: {{ model.provider }}
+            Model: {{ model.model }}
+          {% endfor %}
+          {% else %}
+          No models configured
+          {% endif %}
+          
+          Backend Configuration
+          ---------------------
+          {% if 'litellm_backends' in main_vars %}
+          Total Backends: {{ main_vars.litellm_backends | length }}
+          {% for backend in main_vars.litellm_backends %}
+          - {{ backend }}
+          {% endfor %}
+          {% else %}
+          No backends configured
+          {% endif %}
+          
+          Next Steps
+          ----------
+          {% if validation_passed and vault_stat.stat.exists and vault_encrypted.rc | default(1) == 0 %}
+          ✓ All required variables are properly configured
+          ✓ Vault is encrypted and ready
+          → Proceed to role validation (03-role-validation)
+          {% else %}
+          ✗ Variable validation failed. Fix the following:
+          {% for result in validation_results | selectattr('valid', 'false') %}
+            - {{ result.name }}: {{ result.message }}
+          {% endfor %}
+          {% if not vault_stat.stat.exists or vault_encrypted.rc | default(1) != 0 %}
+            - Vault: {{ 'Does not exist' if not vault_stat.stat.exists else 'Not encrypted' }}
+          {% endif %}
+          {% endif %}
+          
+          Manual Verification Required
+          ----------------------------
+          The litellm_master_key in vault.yml must be manually verified:
+          1. Run: ansible-vault view {{ ansible_base_dir }}/inventories/group_vars/all/vault.yml
+          2. Confirm litellm_master_key exists and matches pattern: sk-<64-hex-chars>
+        dest: "/tmp/litellm_variable_validation_{{ ansible_date_time.epoch }}.txt"
+    
+    - name: Display validation summary
+      debug:
+        msg:
+          - "Variable Validation Summary"
+          - "==========================="
+          - "Non-secret variables: {{ validation_results | selectattr('valid', 'true') | list | length }}/{{ validation_results | length }} valid"
+          - "Vault status: {{ 'Encrypted' if (vault_stat.stat.exists and vault_encrypted.rc | default(1) == 0) else 'NOT READY' }}"
+          - "Overall: {{ 'PASSED' if (validation_passed and vault_stat.stat.exists and vault_encrypted.rc | default(1) == 0) else 'FAILED' }}"
+          - ""
+          - "Report saved to: /tmp/litellm_variable_validation_{{ ansible_date_time.epoch }}.txt"
+          - ""
+          - "{% if validation_passed and vault_stat.stat.exists and vault_encrypted.rc | default(1) == 0 %}Ready to proceed with role validation{% else %}Please fix the issues before proceeding{% endif %}"
+    
+    - name: Fail if validation failed
+      fail:
+        msg: "Variable validation failed. Check the report for details."
+      when: not validation_passed or not vault_stat.stat.exists or vault_encrypted.rc | default(1) != 0

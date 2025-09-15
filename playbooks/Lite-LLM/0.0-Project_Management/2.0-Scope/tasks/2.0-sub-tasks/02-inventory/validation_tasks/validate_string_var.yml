@@ -1,0 +1,37 @@
+---
+# Validate a single string variable
+- name: "Validate string variable: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: "{{ var_config.name in main_vars }}"
+      value: "{{ main_vars[var_config.name] | default(None) }}"
+      valid: false
+      message: "Variable not found"
+  when: var_config.name not in main_vars
+
+- name: "Validate string type and values for: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: true
+      value: "{{ main_vars[var_config.name] }}"
+      valid: "{{ main_vars[var_config.name] is string and 
+                 (var_config.valid_values is not defined or 
+                  main_vars[var_config.name] in var_config.valid_values) }}"
+      message: >-
+        {% if main_vars[var_config.name] is not string %}
+        Invalid type. Expected string, got {{ main_vars[var_config.name] | type_debug }}
+        {% elif var_config.valid_values is defined and main_vars[var_config.name] not in var_config.valid_values %}
+        Invalid value. Must be one of: {{ var_config.valid_values | join(', ') }}
+        {% else %}
+        OK
+        {% endif %}
+  when: var_config.name in main_vars
+
+- name: Add string validation result
+  set_fact:
+    validation_results: "{{ validation_results + [validation_item] }}"
+    validation_passed: "{{ validation_passed and validation_item.valid }}"

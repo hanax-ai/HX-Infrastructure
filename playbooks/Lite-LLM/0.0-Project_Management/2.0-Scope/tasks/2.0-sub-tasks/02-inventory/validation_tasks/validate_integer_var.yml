@@ -1,0 +1,38 @@
+---
+# Validate a single integer variable
+- name: "Validate integer variable: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: "{{ var_config.name in main_vars }}"
+      value: "{{ main_vars[var_config.name] | default(None) }}"
+      valid: false
+      message: "Variable not found"
+  when: var_config.name not in main_vars
+
+- name: "Validate integer type and range for: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: true
+      value: "{{ main_vars[var_config.name] }}"
+      valid: "{{ main_vars[var_config.name] is number and 
+                 main_vars[var_config.name] >= (var_config.min | default(0)) and 
+                 main_vars[var_config.name] <= (var_config.max | default(999999)) }}"
+      message: >-
+        {% if main_vars[var_config.name] is not number %}
+        Invalid type. Expected integer, got {{ main_vars[var_config.name] | type_debug }}
+        {% elif main_vars[var_config.name] < (var_config.min | default(0)) or 
+                main_vars[var_config.name] > (var_config.max | default(999999)) %}
+        Value out of range. Must be between {{ var_config.min | default(0) }} and {{ var_config.max | default(999999) }}
+        {% else %}
+        OK
+        {% endif %}
+  when: var_config.name in main_vars
+
+- name: Add integer validation result
+  set_fact:
+    validation_results: "{{ validation_results + [validation_item] }}"
+    validation_passed: "{{ validation_passed and validation_item.valid }}"

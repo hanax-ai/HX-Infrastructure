@@ -1,0 +1,174 @@
+---
+# LiteLLM Enforcement Playbook
+# Purpose: Deploy and configure LiteLLM proxy on hx-api-server
+# This is the main deployment playbook that uses the hx_litellm_proxy role
+
+- name: Deploy LiteLLM OpenAI-compatible proxy
+  hosts: litellm
+  gather_facts: yes
+  become: yes
+  tags:
+    - critical
+    - high
+    - litellm
+  
+  vars_files:
+    - "../../inventories/group_vars/all/vault.yml"
+  
+  pre_tasks:
+    - name: Verify target host
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == "hx-api-server.dev-test.hana-x.ai"
+        fail_msg: "This playbook should only run on hx-api-server"
+        success_msg: "Target host verified: {{ inventory_hostname }}"
+      tags: always
+
+    - name: Verify required variables
+      ansible.builtin.assert:
+        that:
+          - litellm_bind_host is defined
+          - litellm_bind_port is defined
+          - litellm_backends is defined and litellm_backends | length > 0
+          - litellm_models is defined and litellm_models | length > 0
+          - litellm_master_key is defined and litellm_master_key | length > 10
+        fail_msg: "Required LiteLLM variables are not properly defined"
+        success_msg: "All required variables are present"
+      tags: always
+
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg: |
+          ================================================
+          LiteLLM Proxy Deployment
+          ================================================
+          Target Host: {{ inventory_hostname }}
+          Bind Address: {{ litellm_bind_host }}:{{ litellm_bind_port }}
+          Base URL: {{ litellm_base_url }}
+          Backends: {{ litellm_backends | length }} configured
+          Models: {{ litellm_models | length }} configured
+          ================================================
+      tags: always
+
+  roles:
+    - role: ./roles/hx_litellm_proxy
+      tags:
+        - litellm
+        - proxy
+
+  post_tasks:
+    - name: Wait for service to stabilize
+      ansible.builtin.pause:
+        seconds: 5
+      tags: verify
+
+    - name: Check service status
+      ansible.builtin.systemd:
+        name: litellm
+      register: service_status
+      tags: verify
+
+    - name: Verify service is active
+      ansible.builtin.assert:
+        that:
+          - service_status.status.ActiveState == "active"
+          - service_status.status.SubState == "running"
+        fail_msg: "LiteLLM service is not running properly"
+        success_msg: "LiteLLM service is active and running"
+      tags: verify
+
+    - name: Test API endpoint - health check
+      ansible.builtin.uri:
+        url: "{{ litellm_base_url }}/health"
+        method: GET
+        timeout: 10
+      register: health_check
+      ignore_errors: yes
+      tags: verify
+
+    - name: Test API endpoint - models list (unauthenticated)
+      ansible.builtin.uri:
+        url: "{{ litellm_base_url }}/v1/models"
+        method: GET
+        timeout: 10
+      register: models_check_unauth
+      ignore_errors: yes
+      tags: verify
+
+    - name: Test API endpoint - models list (authenticated)
+      ansible.builtin.uri:
+        url: "{{ litellm_base_url }}/v1/models"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ litellm_master_key }}"
+        timeout: 10
+      register: models_check_auth
+      ignore_errors: yes
+      tags: verify
+
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: |
+          ================================================
+          LiteLLM Deployment Verification
+          ================================================
+          Service Status: {{ service_status.status.ActiveState }}
+          Health Check: {{ 'PASS' if health_check is succeeded else 'FAIL' }}
+          Models API (unauth): {{ 'PASS' if models_check_unauth is succeeded else 'FAIL' }}
+          Models API (auth): {{ 'PASS' if models_check_auth is succeeded else 'FAIL' }}
+          
+          {% if models_check_auth is succeeded %}
+          Available Models:
+          {% for model in models_check_auth.json.data %}
+          - {{ model.id }}
+          {% endfor %}
+          {% endif %}
+          ================================================
+      tags: verify
+
+    - name: Save deployment evidence
+      ansible.builtin.copy:
+        content: |
+          LiteLLM Deployment Evidence
+          ===========================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+          
+          Service Configuration:
+          - Bind: {{ litellm_bind_host }}:{{ litellm_bind_port }}
+          - Base URL: {{ litellm_base_url }}
+          - Service Status: {{ service_status.status.ActiveState }}
+          
+          Backends Configured:
+          {% for backend in litellm_backends %}
+          - {{ backend }}
+          {% endfor %}
+          
+          Models Configured:
+          {% for model in litellm_models %}
+          - {{ model.name }} -> {{ model.model }}
+          {% endfor %}
+          
+          Verification Results:
+          - Health Check: {{ 'PASS' if health_check is succeeded else 'FAIL' }}
+          - Models API: {{ 'PASS' if models_check_auth is succeeded else 'FAIL' }}
+          
+          Next Steps:
+          1. Configure Open WebUI to use {{ litellm_base_url }}/v1
+          2. Use master key for authentication
+          3. Run smoke tests to verify end-to-end functionality
+        dest: "{{ ansible_user_dir }}/hx-ansible/.evidence/litellm_deployment_{{ ansible_date_time.epoch }}.txt"
+      delegate_to: localhost
+      tags: evidence
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          ✓ LiteLLM proxy deployed successfully!
+          
+          Access the API at: {{ litellm_base_url }}/v1
+          Use the master key from vault for authentication.
+          
+          Run the smoke test playbook to verify full functionality:
+          ansible-playbook playbooks/litellm_smoke_test.yml
+      tags: always

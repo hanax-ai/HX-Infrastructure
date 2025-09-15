@@ -1,0 +1,14 @@
+---
+- hosts: webui
+  become: true
+  gather_facts: false
+  tags: [critical, high]
+  roles:
+    - role: hx_webui_install
+      tags: [critical]
+  tasks:
+    - name: Systemd wiring (unit + enable/start)
+      include_role:
+        name: hx_webui_install
+        tasks_from: systemd.yml
+      tags: [high]

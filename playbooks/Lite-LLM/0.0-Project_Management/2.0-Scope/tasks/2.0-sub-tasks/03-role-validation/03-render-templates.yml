@@ -1,0 +1,182 @@
+---
+# Sub-task 03.03: Render Templates with Current Variables
+# Renders templates with current group_vars and checks for errors
+# Dependencies: 02-validate-templates.yml must complete
+# Precedence: Run after template validation
+
+- name: "Render Templates with Current Variables"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    role_base_dir: "{{ playbook_dir }}/../../roles/hx_litellm_proxy"
+    template_dir: "{{ role_base_dir }}/templates"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/litellm_role_validation/{{ ansible_date_time.epoch }}"
+    ansible_base_dir: "{{ playbook_dir }}/../../../.."
+  
+  tasks:
+    - name: Create evidence directory
+      file:
+        path: "{{ evidence_dir }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Load current group variables
+      include_vars:
+        file: "{{ ansible_base_dir }}/inventories/group_vars/all/main.yml"
+        name: current_vars
+      register: vars_loaded
+    
+    - name: Check if vault exists
+      stat:
+        path: "{{ ansible_base_dir }}/inventories/group_vars/all/vault.yml"
+      register: vault_stat
+    
+    - name: Create mock vault variables if vault doesn't exist
+      set_fact:
+        mock_vault_vars:
+          litellm_master_key: "sk-mock1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+      when: not vault_stat.stat.exists
+    
+    - name: Merge variables for rendering
+      set_fact:
+        render_vars: "{{ current_vars | combine(mock_vault_vars | default({})) }}"
+    
+    - name: List templates to render
+      find:
+        paths: "{{ template_dir }}"
+        patterns: "*.j2"
+      register: template_files
+    
+    - name: Render each template
+      template:
+        src: "{{ item.path }}"
+        dest: "{{ evidence_dir }}/{{ item.path | basename | replace('.j2', '') }}"
+      vars: "{{ render_vars }}"
+      loop: "{{ template_files.files }}"
+      register: render_results
+    
+    - name: Validate rendered YAML files
+      shell: |
+        if [[ "{{ item.dest }}" == *.yaml ]] || [[ "{{ item.dest }}" == *.yml ]]; then
+          python3 -c "import yaml; yaml.safe_load(open('{{ item.dest }}'))" 2>&1 || echo "YAML_ERROR"
+        else
+          echo "NOT_YAML"
+        fi
+      loop: "{{ render_results.results }}"
+      register: yaml_validations
+      changed_when: false
+    
+    - name: Check for undefined variables in renders
+      shell: |
+        grep -n "undefined\|error\|UNDEFINED" "{{ item.dest }}" || true
+      loop: "{{ render_results.results }}"
+      register: undefined_checks
+      changed_when: false
+    
+    - name: Analyze litellm.config.yaml structure
+      shell: |
+        python3 -c "
+        import yaml
+        with open('{{ evidence_dir }}/litellm.config.yaml') as f:
+            config = yaml.safe_load(f)
+            print(f'Models configured: {len(config.get(\"model_list\", []))}')
+            print(f'Routing strategy: {config.get(\"router_settings\", {}).get(\"routing_strategy\")}')
+            print(f'Master key present: {\"master_key\" in config.get(\"general_settings\", {})}')
+            print(f'Debug mode: {config.get(\"general_settings\", {}).get(\"debug\")}')
+        "
+      register: config_analysis
+      when: "'litellm.config.yaml' in (render_results.results | map(attribute='dest') | map('basename') | list)"
+      changed_when: false
+    
+    - name: Create render validation report
+      copy:
+        content: |
+          Template Render Validation Report
+          =================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Evidence Directory: {{ evidence_dir }}
+          
+          Render Summary
+          --------------
+          Total templates: {{ template_files.files | length }}
+          Successfully rendered: {{ render_results.results | selectattr('dest', 'defined') | list | length }}
+          Using mock vault: {{ 'YES' if not vault_stat.stat.exists else 'NO' }}
+          
+          Template Render Results
+          -----------------------
+          {% for result in render_results.results %}
+          {{ result.item.path | basename }}:
+            Status: {{ 'SUCCESS' if result.dest is defined else 'FAILED' }}
+            Output: {{ result.dest | basename if result.dest is defined else 'N/A' }}
+            YAML Valid: {{ 'YES' if 'YAML_ERROR' not in yaml_validations.results[loop.index0].stdout else 'NO' }}
+            Undefined vars: {{ 'FOUND' if undefined_checks.results[loop.index0].stdout else 'NONE' }}
+          {% endfor %}
+          
+          Configuration Analysis
+          ----------------------
+          {% if config_analysis.stdout is defined %}
+          {{ config_analysis.stdout }}
+          {% else %}
+          Unable to analyze configuration
+          {% endif %}
+          
+          Variables Used
+          --------------
+          Total variables: {{ render_vars.keys() | list | length }}
+          LiteLLM variables:
+          {% for key in render_vars.keys() | select('match', '^litellm_') | list | sort %}
+          - {{ key }}: {{ render_vars[key] | to_json | truncate(50) }}
+          {% endfor %}
+          
+          Undefined Variable Issues
+          -------------------------
+          {% set has_undefined = namespace(value=false) %}
+          {% for check in undefined_checks.results %}
+          {% if check.stdout %}
+          {% set has_undefined.value = true %}
+          In {{ render_results.results[loop.index0].dest | basename }}:
+          {{ check.stdout | indent(2) }}
+          {% endif %}
+          {% endfor %}
+          {% if not has_undefined.value %}
+          No undefined variables found
+          {% endif %}
+          
+          Rendered Files
+          --------------
+          {% for file in render_results.results %}
+          - {{ file.dest }}
+          {% endfor %}
+          
+          Validation Status
+          -----------------
+          {% set all_valid = render_results.results | selectattr('dest', 'defined') | list | length == template_files.files | length %}
+          {% set yaml_valid = 'YAML_ERROR' not in (yaml_validations.results | map(attribute='stdout') | join('')) %}
+          {% set no_undefined = not (undefined_checks.results | selectattr('stdout') | list) %}
+          
+          Overall: {{ 'PASSED' if (all_valid and yaml_valid and no_undefined) else 'FAILED' }}
+          - All templates rendered: {{ 'YES' if all_valid else 'NO' }}
+          - YAML syntax valid: {{ 'YES' if yaml_valid else 'NO' }}
+          - No undefined variables: {{ 'YES' if no_undefined else 'NO' }}
+          
+          Next Steps
+          ----------
+          {% if all_valid and yaml_valid and no_undefined %}
+          ✓ Templates are valid and ready for deployment
+          → Proceed with role syntax check
+          {% else %}
+          ✗ Fix the following issues:
+          {% if not all_valid %}  - Some templates failed to render{% endif %}
+          {% if not yaml_valid %}  - YAML syntax errors detected{% endif %}
+          {% if not no_undefined %}  - Undefined variables found{% endif %}
+          {% endif %}
+        dest: "{{ evidence_dir }}/render_validation_report.txt"
+    
+    - name: Display summary
+      debug:
+        msg:
+          - "Template render validation completed"
+          - "Templates rendered: {{ render_results.results | length }}"
+          - "Evidence saved to: {{ evidence_dir }}"
+          - "Report: {{ evidence_dir }}/render_validation_report.txt"
+          - "Next: Document any missing variables or template issues"

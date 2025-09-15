@@ -1,0 +1,33 @@
+---
+# Validate a single boolean variable
+- name: "Validate boolean variable: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: "{{ var_config.name in main_vars }}"
+      value: "{{ main_vars[var_config.name] | default(None) }}"
+      valid: false
+      message: "Variable not found"
+  when: var_config.name not in main_vars
+
+- name: "Validate boolean type for: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: true
+      value: "{{ main_vars[var_config.name] }}"
+      valid: "{{ main_vars[var_config.name] is boolean }}"
+      message: >-
+        {% if main_vars[var_config.name] is not boolean %}
+        Invalid type. Expected boolean, got {{ main_vars[var_config.name] | type_debug }}
+        {% else %}
+        OK
+        {% endif %}
+  when: var_config.name in main_vars
+
+- name: Add boolean validation result
+  set_fact:
+    validation_results: "{{ validation_results + [validation_item] }}"
+    validation_passed: "{{ validation_passed and validation_item.valid }}"

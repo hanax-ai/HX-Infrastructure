@@ -1,0 +1,165 @@
+---
+# Sub-task 01.06: Evidence Collection and Summary
+# Collects all evidence and creates summary report
+# Dependencies: All previous preflight checks (01-05)
+# Precedence: Must run last in preflight sequence
+
+- name: "Evidence Collection and Summary Report"
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    timestamp: "{{ hostvars['localhost']['timestamp'] | default(ansible_date_time.epoch) }}"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/api-preflight/{{ timestamp }}"
+    evidence_subdirs:
+      - dns
+      - network
+      - domain
+      - ca-trust
+      - python
+  
+  tasks:
+    - name: Ensure evidence directory exists
+      file:
+        path: "{{ evidence_dir }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Check evidence subdirectories
+      stat:
+        path: "{{ evidence_dir }}/{{ item }}"
+      register: subdir_checks
+      loop: "{{ evidence_subdirs }}"
+    
+    - name: Count evidence files
+      find:
+        paths: "{{ evidence_dir }}"
+        recurse: yes
+        file_type: file
+      register: evidence_files
+    
+    - name: Calculate evidence size
+      shell: du -sh {{ evidence_dir }}
+      register: evidence_size
+      changed_when: false
+    
+    - name: Prepare helper variables for report
+      set_fact:
+        created_subdirs: "{{ subdir_checks.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+        evidence_file_paths: "{{ evidence_files.files | map(attribute='path') | list }}"
+    
+    - name: Calculate file counts per subdirectory
+      set_fact:
+        subdir_file_counts: |
+          {%- set counts = {} -%}
+          {%- for subdir in evidence_subdirs -%}
+            {%- set prefix = evidence_dir + '/' + subdir + '/' -%}
+            {%- set count = evidence_file_paths | select('match', prefix + '.*') | list | length -%}
+            {%- set _ = counts.update({subdir: count}) -%}
+          {%- endfor -%}
+          {{ counts }}
+    
+    - name: Create summary report
+      copy:
+        content: |
+          LiteLLM Pre-Flight Checks Summary Report
+          ========================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Evidence ID: {{ timestamp }}
+          Evidence Location: {{ evidence_dir }}
+          
+          Execution Summary
+          -----------------
+          Total Evidence Files: {{ evidence_files.files | length }}
+          Evidence Size: {{ evidence_size.stdout.split('\t')[0] }}
+          
+          Check Status by Category
+          ------------------------
+          {% for subdir in evidence_subdirs %}
+          {{ subdir | upper }}:
+          - Evidence Directory: {{ 'Created' if subdir in created_subdirs else 'MISSING' }}
+          - Files: {{ subdir_file_counts[subdir] | default(0) }}
+          {% endfor %}
+          
+          Evidence Structure
+          ------------------
+          {{ evidence_dir }}/
+          ├── dns/
+          │   ├── resolution_results.txt
+          │   └── detailed_dns.txt
+          ├── network/
+          │   ├── validation_results.txt
+          │   └── firewall_rules.txt
+          ├── domain/
+          │   ├── validation_results.txt
+          │   └── realm_status.txt
+          ├── ca-trust/
+          │   ├── validation_results.txt
+          │   ├── hx-root-ca.crt
+          │   └── all_trusted_cas.txt
+          ├── python/
+          │   ├── validation_results.txt
+          │   ├── system_packages.yml
+          │   └── venv_packages.yml
+          └── preflight_summary.txt (this file)
+          
+          Next Steps
+          ----------
+          1. Review all evidence files for any failures or warnings
+          2. Address any issues identified in the checks
+          3. Proceed to inventory setup (02-inventory) if all checks pass
+          4. Archive this evidence for audit purposes
+          
+          Validation Checklist
+          --------------------
+          [ ] DNS resolution working for all hosts
+          [ ] Network connectivity to backends verified
+          [ ] Domain join and sudo privileges confirmed
+          [ ] HX Root CA trusted in system
+          [ ] Python 3.11 runtime installed and configured
+          [ ] Virtual environment created for litellm user
+          
+          Notes
+          -----
+          - All checks must pass before proceeding with deployment
+          - Evidence is timestamped and should be retained for compliance
+          - Re-run specific checks if remediation was required
+        dest: "{{ evidence_dir }}/preflight_summary.txt"
+    
+    - name: Create evidence manifest
+      copy:
+        content: |
+          ---
+          # Pre-Flight Evidence Manifest
+          manifest_version: "1.0"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          evidence_id: "{{ timestamp }}"
+          
+          files:
+          {% for file in evidence_files.files %}
+            - path: "{{ file.path | replace(evidence_dir + '/', '') }}"
+              size: {{ file.size }}
+              modified: "{{ file.mtime }}"
+          {% endfor %}
+          
+          checksums:
+          {% for file in evidence_files.files %}
+            "{{ file.path | replace(evidence_dir + '/', '') }}": "{{ file.checksum | default('pending') }}"
+          {% endfor %}
+        dest: "{{ evidence_dir }}/manifest.yml"
+    
+    - name: Create tarball of evidence
+      archive:
+        path: "{{ evidence_dir }}"
+        dest: "{{ evidence_dir }}.tar.gz"
+        format: gz
+      register: evidence_archive
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "Pre-flight checks completed!"
+          - "Evidence saved to: {{ evidence_dir }}"
+          - "Evidence archive: {{ evidence_archive.dest }}"
+          - "Review the summary at: {{ evidence_dir }}/preflight_summary.txt"
+          - ""
+          - "Next: Run inventory setup tasks in 02-inventory/"

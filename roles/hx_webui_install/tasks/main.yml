@@ -1,0 +1,126 @@
+---
+- name: Ensure service user exists
+  ansible.builtin.user:
+    name: openwebui
+    shell: /usr/sbin/nologin
+    create_home: true
+
+
+- name: Download uv installer script
+  become: true
+  become_user: openwebui
+  ansible.builtin.get_url:
+    url: https://astral.sh/uv/install.sh
+    dest: /tmp/uv-install.sh
+    mode: '0700'
+    force: true
+
+- name: Download uv installer SHA256 checksum
+  become: true
+  become_user: openwebui
+  ansible.builtin.get_url:
+    url: https://astral.sh/uv/install.sh.sha256
+    dest: /tmp/uv-install.sh.sha256
+    mode: '0644'
+    force: true
+
+- name: Verify uv installer script checksum
+  become: true
+  become_user: openwebui
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    cd /tmp
+    sha256sum -c uv-install.sh.sha256
+  args:
+    executable: /bin/bash
+  register: uv_checksum
+  changed_when: false
+  failed_when: uv_checksum.rc != 0 or 'OK' not in uv_checksum.stdout
+
+- name: Get installed uv version (if any)
+  become: true
+  become_user: openwebui
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    /home/openwebui/.local/bin/uv --version 2>/dev/null || echo "none"
+  args:
+    executable: /bin/bash
+  register: uv_version
+  changed_when: false
+
+- name: Install uv for service user (only if not present or version mismatch)
+  become: true
+  become_user: openwebui
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    /bin/bash /tmp/uv-install.sh
+  args:
+    executable: /bin/bash
+  when: uv_version.stdout is search('none')
+
+
+- name: Stat open-webui binary
+  become: true
+  become_user: openwebui
+  ansible.builtin.stat:
+    path: /home/openwebui/.local/bin/open-webui
+  register: openwebui_bin
+
+- name: Install Open WebUI tool (Python 3.11) if missing
+  become: true
+  become_user: openwebui
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    /home/openwebui/.local/bin/uv tool install --python 3.11 open-webui
+  args:
+    executable: /bin/bash
+  when: not openwebui_bin.stat.exists
+  register: openwebui_install
+  changed_when: openwebui_install.rc == 0 and (openwebui_install.stdout is not search('already installed') and openwebui_install.stdout is not search('No changes'))
+  failed_when: openwebui_install.rc != 0 or (openwebui_install.stderr is defined and openwebui_install.stderr|length > 0)
+
+- name: Ensure config dir exists
+  ansible.builtin.file:
+    path: /etc/open-webui
+    state: directory
+    mode: '0755'
+
+- name: Render environment file
+  ansible.builtin.template:
+    src: open-webui.env.j2
+    dest: /etc/open-webui/open-webui.env
+    owner: root
+    group: root
+    mode: '0640'
+  notify: Restart open-webui
+
+- name: Ensure data directory for Open WebUI exists
+  ansible.builtin.file:
+    path: /var/lib/open-webui
+    state: directory
+    owner: openwebui
+    group: openwebui
+    mode: '0750'
+
+
+
+- name: Stat service binary under service user home
+  ansible.builtin.stat:
+    path: /home/openwebui/.local/bin/open-webui
+  register: ow_bin
+
+- name: Fail if open-webui binary is missing (install step should have created it)
+  ansible.builtin.fail:
+    msg: "open-webui binary not found at /home/openwebui/.local/bin/open-webui; check uv install step."
+  when: not ow_bin.stat.exists
+
+# Install system-wide wrapper so unit can ExecStart without /home access
+- name: Install /usr/local/bin/open-webui wrapper (copy from service user path)
+  ansible.builtin.copy:
+    remote_src: true
+    src: /home/openwebui/.local/bin/open-webui
+    dest: /usr/local/bin/open-webui
+    owner: root
+    group: root
+    mode: '0755'
+  when: ow_bin.stat.exists

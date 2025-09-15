@@ -1,0 +1,182 @@
+---
+# LiteLLM Master Task Orchestration - Fixed Version
+# This playbook orchestrates all sub-tasks with proper sequencing and dependencies
+# Uses import_playbook for sub-task execution
+
+- name: "LiteLLM Deployment Master Orchestration"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    timestamp: "{{ ansible_date_time.epoch }}"
+    evidence_base: "{{ playbook_dir }}/../../../.evidence"
+    
+    # Task execution flags (can be overridden with --extra-vars)
+    run_preflight: true
+    run_inventory: true  
+    run_role_validation: true
+    skip_on_failure: false
+    dry_run: false  # Add this flag for validation-only runs
+    
+  tasks:
+    - name: Display execution plan
+      debug:
+        msg:
+          - "========================================"
+          - "LiteLLM Deployment Orchestration"
+          - "========================================"
+          - "Dry Run Mode: {{ dry_run }}"
+          - "Run Pre-flight: {{ run_preflight }}"
+          - "Run Inventory: {{ run_inventory }}"
+          - "Run Role Validation: {{ run_role_validation }}"
+          - "Skip on Failure: {{ skip_on_failure }}"
+          - "========================================"
+
+# ========================================
+# PHASE 1: PRE-FLIGHT CHECKS (REQ-3.01)
+# ========================================
+- name: "PHASE 1: Pre-Flight Checks"
+  import_playbook: tasks/2.0-sub-tasks/01-preflight/01-dns-resolution.yml
+  when: run_preflight | default(true) | bool
+
+- name: "PHASE 1: Network Validation"
+  import_playbook: tasks/2.0-sub-tasks/01-preflight/02-network-validation.yml
+  when: run_preflight | default(true) | bool
+
+- name: "PHASE 1: Domain Validation"
+  import_playbook: tasks/2.0-sub-tasks/01-preflight/03-domain-validation.yml
+  when: run_preflight | default(true) | bool
+
+- name: "PHASE 1: CA Trust Validation"
+  import_playbook: tasks/2.0-sub-tasks/01-preflight/04-ca-trust-validation.yml
+  when: run_preflight | default(true) | bool
+
+- name: "PHASE 1: Python Runtime Validation"
+  import_playbook: tasks/2.0-sub-tasks/01-preflight/05-python-runtime.yml
+  when: run_preflight | default(true) | bool
+
+- name: "PHASE 1: Evidence Collection"
+  import_playbook: tasks/2.0-sub-tasks/01-preflight/06-evidence-collection.yml
+  when: run_preflight | default(true) | bool
+
+# ========================================
+# PHASE 2: INVENTORY SETUP (REQ-3.02)
+# ========================================
+- name: "PHASE 2: Add LiteLLM Group"
+  import_playbook: tasks/2.0-sub-tasks/02-inventory/01-add-litellm-group.yml
+  when: run_inventory | default(true) | bool
+
+- name: "PHASE 2: Configure Group Variables"
+  import_playbook: tasks/2.0-sub-tasks/02-inventory/02-configure-group-vars.yml
+  when: run_inventory | default(true) | bool
+
+- name: "PHASE 2: Setup Vault"
+  import_playbook: tasks/2.0-sub-tasks/02-inventory/03-setup-vault.yml
+  when: run_inventory | default(true) | bool
+
+- name: "PHASE 2: Quarantine Stray Vaults"
+  import_playbook: tasks/2.0-sub-tasks/02-inventory/04-quarantine-stray-vaults.yml
+  when: run_inventory | default(true) | bool
+
+- name: "PHASE 2: Validate Variables"
+  import_playbook: tasks/2.0-sub-tasks/02-inventory/05-validate-variables.yml
+  when: run_inventory | default(true) | bool
+
+# Manual intervention pause
+- name: "Manual Intervention Required"
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: "Pause for manual vault configuration"
+      pause:
+        prompt: |
+          
+          ============================================
+          MANUAL INTERVENTION REQUIRED
+          ============================================
+          
+          Please complete the following manual steps:
+          
+          1. Add the master key to vault:
+             ansible-vault edit inventories/group_vars/all/vault.yml
+             
+             Add: litellm_master_key: "sk-<your-generated-key>"
+          
+          2. Verify the vault is encrypted:
+             head -1 inventories/group_vars/all/vault.yml
+             (Should show $ANSIBLE_VAULT...)
+          
+          Press ENTER when completed...
+      when: 
+        - run_inventory | default(true) | bool
+
+# ========================================
+# PHASE 3: ROLE VALIDATION (REQ-3.03)
+# ========================================
+- name: "PHASE 3: Verify Role Structure"
+  import_playbook: tasks/2.0-sub-tasks/03-role-validation/01-verify-role-structure.yml
+  when: run_role_validation | default(true) | bool
+
+- name: "PHASE 3: Validate Templates"
+  import_playbook: tasks/2.0-sub-tasks/03-role-validation/02-validate-templates.yml
+  when: run_role_validation | default(true) | bool
+
+- name: "PHASE 3: Render Templates"
+  import_playbook: tasks/2.0-sub-tasks/03-role-validation/03-render-templates.yml
+  when: run_role_validation | default(true) | bool
+
+- name: "PHASE 3: Document Issues"
+  import_playbook: tasks/2.0-sub-tasks/03-role-validation/04-document-issues.yml
+  when: run_role_validation | default(true) | bool
+
+# ========================================
+# FINAL SUMMARY
+# ========================================
+- name: "Generate Final Summary"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    timestamp: "{{ ansible_date_time.epoch }}"
+    evidence_base: "{{ playbook_dir }}/../../../.evidence"
+  tasks:
+    - name: Create summary report
+      copy:
+        content: |
+          LiteLLM Task Orchestration Summary
+          ==================================
+          Execution Time: {{ ansible_date_time.iso8601 }}
+          Evidence ID: {{ timestamp }}
+          
+          Task Execution Complete
+          -----------------------
+          All phases have been executed. Check the evidence directories for detailed results:
+          
+          Evidence Locations
+          ------------------
+          Pre-Flight: {{ evidence_base }}/api-preflight/*/
+          Role Validation: {{ evidence_base }}/litellm_role_validation/*/
+          Variable Validation: /tmp/litellm_variable_validation_*.txt
+          
+          Next Steps
+          ----------
+          1. Review all evidence and reports
+          2. Fix any issues identified
+          3. Proceed with deployment if all validations passed
+          
+          Deployment Command:
+          -------------------
+          ansible-playbook -i inventories/dev.ini playbooks/litellm_enforce.yml --limit hx-api-server --ask-vault-pass
+          
+          Smoke Test Command:
+          -------------------
+          ansible-playbook playbooks/litellm_smoke_test.yml --ask-vault-pass
+        dest: "{{ evidence_base }}/litellm_orchestration_{{ timestamp }}.txt"
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "======================================"
+          - "LiteLLM Task Orchestration Complete"
+          - "======================================"
+          - "Summary saved to: {{ evidence_base }}/litellm_orchestration_{{ timestamp }}.txt"
+          - ""
+          - "Check evidence directories for detailed results"

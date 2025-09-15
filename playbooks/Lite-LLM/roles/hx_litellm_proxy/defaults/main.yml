@@ -1,0 +1,39 @@
+---
+# Default values for hx_litellm_proxy role
+
+# Service user configuration
+litellm_user: litellm
+litellm_group: litellm
+litellm_home: /home/litellm
+litellm_shell: /usr/sbin/nologin
+
+# Installation paths
+litellm_venv_path: "{{ litellm_home }}/litellm-venv"
+litellm_config_dir: /etc/litellm
+litellm_log_dir: /var/log/litellm
+
+# Service configuration
+litellm_service_name: litellm
+litellm_service_restart_sec: 3
+litellm_service_restart_policy: always
+
+# Python version
+litellm_python_version: "3.11"
+litellm_pip_extra_args: ""
+
+# Package version (latest by default, can be pinned)
+litellm_version: "latest"
+
+# Config file permissions
+litellm_config_mode: '0640'
+litellm_env_mode: '0640'
+
+# Service hardening options
+litellm_service_hardening:
+  NoNewPrivileges: "true"
+  ProtectSystem: "strict"
+  ProtectHome: "true"
+  PrivateTmp: "true"
+  ProtectKernelTunables: "true"
+  ProtectControlGroups: "true"
+  UMask: '007'

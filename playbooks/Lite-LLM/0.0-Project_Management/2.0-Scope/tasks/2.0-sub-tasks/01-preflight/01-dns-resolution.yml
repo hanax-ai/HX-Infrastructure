@@ -1,0 +1,69 @@
+---
+# Sub-task 01.01: DNS Resolution Check
+# Validates DNS resolution for all involved hosts
+# Dependencies: None
+# Precedence: Must run first in preflight sequence
+
+- name: "DNS Resolution Check for LiteLLM Infrastructure"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    timestamp: "{{ ansible_date_time.epoch }}"
+    evidence_dir: "{{ playbook_dir }}/../../../../.evidence/api-preflight/{{ timestamp }}"
+    hosts_to_check:
+      - hx-api-server.dev-test.hana-x.ai
+      - hx-llm01-server.dev-test.hana-x.ai
+      - hx-llm02-server.dev-test.hana-x.ai
+      - hx-ca-server.dev-test.hana-x.ai
+      - dev-test.hana-x.ai
+  
+  tasks:
+    - name: Create evidence directory
+      file:
+        path: "{{ evidence_dir }}/dns"
+        state: directory
+        mode: '0755'
+    
+    - name: Check DNS resolution for each host
+      command: "dig +short {{ item }}"
+      register: dns_results
+      loop: "{{ hosts_to_check }}"
+      changed_when: false
+    
+    - name: Validate DNS results
+      assert:
+        that:
+          - item.stdout != ""
+          - item.rc == 0
+        fail_msg: "DNS resolution failed for {{ item.item }}"
+        success_msg: "DNS resolution successful for {{ item.item }}: {{ item.stdout }}"
+      loop: "{{ dns_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+    
+    - name: Save DNS resolution evidence
+      copy:
+        content: |
+          DNS Resolution Check Results
+          ============================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          
+          {% for result in dns_results.results %}
+          Host: {{ result.item }}
+          Resolution: {{ result.stdout | default('FAILED') }}
+          Return Code: {{ result.rc }}
+          ---
+          {% endfor %}
+        dest: "{{ evidence_dir }}/dns/resolution_results.txt"
+    
+    - name: Run detailed DNS queries
+      shell: |
+        echo "=== DNS Details for {{ item }} ===" >> {{ evidence_dir }}/dns/detailed_dns.txt
+        dig {{ item }} A >> {{ evidence_dir }}/dns/detailed_dns.txt
+        echo "" >> {{ evidence_dir }}/dns/detailed_dns.txt
+      loop: "{{ hosts_to_check }}"
+      changed_when: false
+    
+    - name: Display summary
+      debug:
+        msg: "DNS resolution check completed. Evidence saved to {{ evidence_dir }}/dns/"

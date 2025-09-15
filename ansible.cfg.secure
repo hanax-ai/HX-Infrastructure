@@ -1,0 +1,13 @@
+[defaults]
+inventory = inventories/dev.ini
+host_key_checking = False
+roles_path = ~/hx-ansible/roles
+pipelining = True
+forks = 20
+timeout = 15
+gathering = explicit
+retry_files_enabled = False
+# vault_password_file removed for security - use environment variables or --ask-vault-pass
+
+[ssh_connection]
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s
