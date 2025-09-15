@@ -1,18 +1,6 @@
 ---
 # Task 3.03 - Role Skeleton and Template Validation
-# Purpose: Ensure the Ansible role structure for LiteLLM is present and templates     - name: "Validation | Check rendered config for critical elements"
-      ansible.builtin.lineinfile:
-        path: "{{ evidence_dir }}/litellm.config.yaml.rendered"
-        line: "{{ item }}"
-        state: present
-      register: config_checks
-      loop:
-        - "model_list:"
-        - "router_settings:"
-        - "general_settings:"
-        - "master_key:"
-      changed_when: false
-      failed_when: config_checks.results | selectattr('matched', 'equalto', 1) | list | length == 0ly
+# Purpose: Ensure the Ansible role structure for LiteLLM is present and templates are valid
 # This playbook creates the role structure and validates templates with current group variables
 
 - name: LiteLLM Role Structure and Template Validation
@@ -138,14 +126,30 @@
       ansible.builtin.template:
         src: "{{ role_base_dir }}/templates/litellm.config.yaml.j2"
         dest: "{{ evidence_dir }}/litellm.config.yaml.rendered"
-      vars: "{{ test_vars }}"
+      vars:
+        litellm_bind_host: "{{ test_vars.litellm_bind_host }}"
+        litellm_bind_port: "{{ test_vars.litellm_bind_port }}"
+        litellm_base_url: "{{ test_vars.litellm_base_url }}"
+        litellm_backends: "{{ test_vars.litellm_backends }}"
+        litellm_models: "{{ test_vars.litellm_models }}"
+        litellm_master_key: "{{ test_vars.litellm_master_key }}"
+        litellm_request_timeout: "{{ test_vars.litellm_request_timeout }}"
+        litellm_max_retries: "{{ test_vars.litellm_max_retries }}"
       register: config_render
 
     - name: "Validation | Test render env template"
       ansible.builtin.template:
         src: "{{ role_base_dir }}/templates/litellm.env.j2"
         dest: "{{ evidence_dir }}/litellm.env.rendered"
-      vars: "{{ test_vars }}"
+      vars:
+        litellm_bind_host: "{{ test_vars.litellm_bind_host }}"
+        litellm_bind_port: "{{ test_vars.litellm_bind_port }}"
+        litellm_base_url: "{{ test_vars.litellm_base_url }}"
+        litellm_backends: "{{ test_vars.litellm_backends }}"
+        litellm_models: "{{ test_vars.litellm_models }}"
+        litellm_master_key: "{{ test_vars.litellm_master_key }}"
+        litellm_request_timeout: "{{ test_vars.litellm_request_timeout }}"
+        litellm_max_retries: "{{ test_vars.litellm_max_retries }}"
       register: env_render
 
     - name: "Validation | Check rendered config for required elements"

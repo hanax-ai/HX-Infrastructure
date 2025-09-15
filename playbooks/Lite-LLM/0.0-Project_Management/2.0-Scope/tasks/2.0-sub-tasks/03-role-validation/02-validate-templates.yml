@@ -154,7 +154,7 @@
     
     - name: Validate rendered YAML syntax
       shell: |
-        python3 -c "import yaml; yaml.safe_load(open('/tmp/test_render_litellm.config.yaml.yaml'))"
+        python3 -c "import yaml; yaml.safe_load(open('/tmp/test_render_litellm.config.yaml'))"
       register: yaml_validation
       changed_when: false
     
@@ -166,7 +166,7 @@
     
     - name: Check if test render config file exists
       ansible.builtin.stat:
-        path: /tmp/test_render_litellm.config.yaml.yaml
+        path: /tmp/test_render_litellm.config.yaml
       register: config_file_stat
     
     - name: Check if test render env file exists
@@ -213,7 +213,7 @@
           Test Rendered Config Sample
           ---------------------------
           litellm.config.yaml:
-          {{ lookup('file', '/tmp/test_render_litellm.config.yaml.yaml') | truncate(500) if config_file_stat.stat.exists else 'File not found' }}
+          {{ lookup('file', '/tmp/test_render_litellm.config.yaml') | truncate(500) if config_file_stat.stat.exists else 'File not found' }}
           
           litellm.env:
           {{ lookup('file', '/tmp/test_render_litellm.env') | truncate(300) if env_file_stat.stat.exists else 'File not found' }}

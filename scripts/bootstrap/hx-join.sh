@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+# HX Domain Join Script - Non-interactive version
+# 
+# Requirements:
+#   - Kerberos keytab file must be provisioned at $HX_KEYTAB_SOURCE (default: /tmp/administrator.keytab)
+#   - Keytab should be retrieved from a secrets manager (e.g., HashiCorp Vault, AWS Secrets Manager)
+#   - Script will fail fast on any error to prevent partial configurations
+#
+# Environment Variables:
+#   HX_KEYTAB_SOURCE - Path to the administrator keytab file (default: /tmp/administrator.keytab)
+#   HX_IP - IP address for the host (required)
+#   HX_FQDN - Fully qualified domain name (auto-detected if not set)
+#   HX_GW - Gateway IP (default: 192.168.10.1)
+#   HX_DC - Domain controller IP (default: 192.168.10.2)
+#   HX_REALM - Kerberos realm (default: DEV-TEST.HANA-X.AI)
+#   HX_DOMAIN - DNS domain (default: dev-test.hana-x.ai)
+#   HX_PERMIT_GROUPS - AD groups to permit (default: "Domain Admins,DevOps Users")
+
 set -euo pipefail
 
 FQDN_DEFAULT="$(hostname -f 2>/dev/null || true)"
@@ -46,10 +63,42 @@ EOF
 sudo chmod 600 /etc/netplan/01-hx.yaml
 sudo netplan apply
 
+# Keytab configuration for non-interactive authentication
+KEYTAB_PATH="/etc/krb5.keytab.administrator"
+KEYTAB_SOURCE="${HX_KEYTAB_SOURCE:-/tmp/administrator.keytab}"
+
 echo "=== realm join ==="
-kinit "administrator@${HX_REALM}"
-realm discover "${HX_REALM}" >/dev/null
-sudo realm join "${HX_REALM}" -U Administrator || echo "Already joined?"
+
+# Check if keytab exists and has proper permissions
+if [ ! -f "$KEYTAB_SOURCE" ]; then
+    fail "Keytab file not found at $KEYTAB_SOURCE. Please provision from secrets manager."
+fi
+
+# Copy keytab to secure location with proper permissions
+sudo cp "$KEYTAB_SOURCE" "$KEYTAB_PATH"
+sudo chmod 600 "$KEYTAB_PATH"
+sudo chown root:root "$KEYTAB_PATH"
+
+# Non-interactive kinit using keytab
+echo "Authenticating using keytab..."
+kinit -kt "$KEYTAB_PATH" "administrator@${HX_REALM}" || fail "Failed to authenticate with keytab"
+
+# Verify Kerberos ticket
+klist &>/dev/null || fail "No valid Kerberos ticket after kinit"
+
+# Discover realm
+realm discover "${HX_REALM}" >/dev/null || fail "Failed to discover realm ${HX_REALM}"
+
+# Non-interactive realm join using existing Kerberos ticket
+echo "Joining realm ${HX_REALM}..."
+if sudo realm list | grep -q "${HX_DOMAIN}"; then
+    echo "Already joined to ${HX_DOMAIN}"
+else
+    sudo realm join "${HX_REALM}" --verbose || fail "Failed to join realm ${HX_REALM}"
+fi
+
+# Clean up keytab from temp location
+[ -f "$KEYTAB_SOURCE" ] && rm -f "$KEYTAB_SOURCE"
 
 # Ensure sssd config exists (realmd may create it; if not, we do)
 if [ ! -s /etc/sssd/sssd.conf ]; then
