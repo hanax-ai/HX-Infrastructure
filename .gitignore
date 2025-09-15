@@ -23,3 +23,8 @@ vault_pass.txt
 
 # local tmp
 tmp/
+x-archive/
+
+# evidence (keep out of git)
+.evidence/
+x-tasks/

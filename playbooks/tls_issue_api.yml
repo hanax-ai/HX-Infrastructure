@@ -1,0 +1,121 @@
+---
+- name: Issue TLS for hx-api-server (API)
+  hosts: hx-api-server.dev-test.hana-x.ai
+  become: true
+  gather_facts: true
+  vars:
+  cert_dir: "{{ cert_dir | default('/etc/ssl/hx-api') }}"
+  key_file: "{{ cert_dir }}/server.key"
+  csr_file: "{{ cert_dir }}/server.csr"
+  crt_file: "{{ cert_dir }}/server.crt"
+  ca_profile: /etc/hx/ca/profiles/v3_server.ext
+  ca_root: /etc/hx/ca/root/ca.crt
+  ca_key: /etc/hx/ca/root/private/ca.key
+  tls_cn: "{{ tls_cn | default(inventory_hostname) }}"
+  tls_alt_dns: {{ tls_alt_dns | default([inventory_hostname, inventory_hostname_short|default(inventory_hostname)]) }}
+  tasks:
+    - name: Ensure cert directory exists
+      file:
+        path: "{{ cert_dir }}"
+        state: directory
+        mode: '0750'
+
+    - name: Generate private key (RSA 2048)
+      community.crypto.openssl_privatekey:
+        path: "{{ key_file }}"
+        size: 2048
+        type: RSA
+        mode: '0640'
+        owner: root
+        group: www-data
+
+    - name: Build CSR with SANs
+      shell: |
+        set -euo pipefail
+        cat > {{ cert_dir }}/csr.conf <<EOF
+        [ req ]
+        prompt = no
+        distinguished_name = dn
+        req_extensions = v3_req
+        [ dn ]
+        CN = {{ tls_cn }}
+        [ v3_req ]
+        subjectAltName = @alt_names
+        keyUsage = digitalSignature, keyEncipherment
+        extendedKeyUsage = serverAuth
+        [ alt_names ]
+        {% for dns in tls_alt_dns %}DNS.{{ loop.index }} = {{ dns }}
+        {% endfor %}EOF
+        openssl req -new -key {{ key_file }} -out {{ csr_file }} -config {{ cert_dir }}/csr.conf
+      args:
+        executable: /bin/bash
+
+
+    - name: Fetch CSR from API server to control node
+      fetch:
+        src: "{{ csr_file }}"
+        dest: "/tmp/hx-api-server.csr"
+        flat: true
+
+    - name: Copy CSR from control node to CA host
+      copy:
+        src: "/tmp/hx-api-server.csr"
+        dest: "/etc/hx/ca/root/csr/hx-api-server.csr"
+        remote_src: false
+      delegate_to: hx-ca-server.dev-test.hana-x.ai
+
+    - name: Sign on CA host
+      delegate_to: hx-ca-server.dev-test.hana-x.ai
+      shell: |
+        set -euo pipefail
+        openssl x509 -req -in /etc/hx/ca/root/csr/hx-api-server.csr \
+          -CA {{ ca_root }} -CAkey {{ ca_key }} -CAcreateserial \
+          -days 730 -sha256 -extfile {{ ca_profile }} \
+          -out /etc/hx/ca/root/certs/hx-api-server.crt
+        openssl verify -CAfile {{ ca_root }} /etc/hx/ca/root/certs/hx-api-server.crt
+      args:
+        executable: /bin/bash
+
+
+    - name: Retrieve signed cert to control node
+      fetch:
+        src: "/etc/hx/ca/root/certs/hx-api-server.crt"
+        dest: "/tmp/hx-api-server.crt"
+        flat: true
+      delegate_to: hx-ca-server.dev-test.hana-x.ai
+
+    - name: Copy signed cert to API server
+      copy:
+        src: "/tmp/hx-api-server.crt"
+        dest: "{{ crt_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Retrieve CA cert to control node
+      fetch:
+        src: "{{ ca_root }}"
+        dest: "/tmp/hx-root-ca.crt"
+        flat: true
+      delegate_to: hx-ca-server.dev-test.hana-x.ai
+
+    - name: Copy CA cert to API server
+      copy:
+        src: "/tmp/hx-root-ca.crt"
+        dest: "/usr/local/share/ca-certificates/hx-root-ca.crt"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Evidence dir
+      file:
+        path: "~/.evidence/tls-{{ ansible_date_time.date }}"
+        state: directory
+
+    - name: Verify TLS locally (openssl s_client)
+      shell: |
+        openssl s_client -connect localhost:443 -servername hx-api-server.dev-test.hana-x.ai \
+          -CAfile /usr/local/share/ca-certificates/hx-root-ca.crt </dev/null 2>&1 \
+          | egrep 'Verify return code|subject=|issuer=' > ~/.evidence/tls-{{ ansible_date_time.date }}/openssl_s_client_local.txt
+      args:
+        executable: /bin/bash

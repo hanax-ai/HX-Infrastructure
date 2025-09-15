@@ -1,0 +1,5 @@
+cert_dir: /etc/ssl/hx-api
+tls_cn: "{{ inventory_hostname }}"
+tls_alt_dns:
+  - "{{ inventory_hostname }}"
+  - "{{ inventory_hostname_short }}"
