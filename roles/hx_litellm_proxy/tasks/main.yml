@@ -26,25 +26,9 @@
   args: { creates: /opt/litellm/bin/activate }
 
 - name: Install/upgrade LiteLLM and its database dependencies
-  ansible.builtin.pip:
-    name:
-      - litellm[proxy]
-      - psycopg2-binary
-      - prisma
-      - PyYAML
-    virtualenv: /opt/litellm
-    extra_args: --upgrade
-
-- name: Ensure Prisma Python client is available in PATH for litellm user
   become: true
   become_user: litellm
-  ansible.builtin.shell:
-    cmd: |
-      export PATH="/opt/litellm/bin:$PATH"
-      which prisma-client-py || echo "prisma-client-py not found in PATH"
-    chdir: /opt/litellm
-  register: prisma_check
-  changed_when: false
+  ansible.builtin.command: /opt/litellm/bin/pip install --upgrade "litellm[proxy]" psycopg2-binary prisma PyYAML
 
 - name: Deploy Prisma schema file
   ansible.builtin.template:
@@ -57,25 +41,26 @@
 - name: Generate the Prisma client query engine
   become: true
   become_user: litellm
-  ansible.builtin.shell:
-    cmd: |
-      export DATABASE_URL="postgresql://{{ litellm_db_user }}:{{ litellm_db_password }}@{{ litellm_db_host }}:5432/{{ litellm_db_name }}"
-      export PRISMA_PY_DEBUG_GENERATOR=1
-      export PATH="/opt/litellm/bin:$PATH"
-      /opt/litellm/bin/python -m prisma generate
+  ansible.builtin.command: /opt/litellm/bin/prisma generate
+  args:
     chdir: /opt/litellm
-  changed_when: true
+  environment:
+    PATH: "/opt/litellm/bin:{{ ansible_env.PATH }}"
+    DATABASE_URL: "postgresql://{{ litellm_db_user }}:{{ litellm_db_password }}@{{ litellm_db_host }}:5432/{{ litellm_db_name }}"
+    XDG_CACHE_HOME: "/opt/litellm/.cache"
+  no_log: true
 
 - name: Push the Prisma schema to the database
   become: true
   become_user: litellm
-  ansible.builtin.shell:
-    cmd: |
-      export DATABASE_URL="postgresql://{{ litellm_db_user }}:{{ litellm_db_password }}@{{ litellm_db_host }}:5432/{{ litellm_db_name }}"
-      export PATH="/opt/litellm/bin:$PATH"
-      /opt/litellm/bin/python -m prisma db push --accept-data-loss
+  ansible.builtin.command: /opt/litellm/bin/prisma db push
+  args:
     chdir: /opt/litellm
-  changed_when: true
+  environment:
+    PATH: "/opt/litellm/bin:{{ ansible_env.PATH }}"
+    DATABASE_URL: "postgresql://{{ litellm_db_user }}:{{ litellm_db_password }}@{{ litellm_db_host }}:5432/{{ litellm_db_name }}"
+    XDG_CACHE_HOME: "/opt/litellm/.cache"
+  no_log: true
 
 - name: Create configuration and log directories
   ansible.builtin.file:

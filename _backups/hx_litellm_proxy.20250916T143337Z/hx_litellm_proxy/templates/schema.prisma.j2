@@ -1,0 +1,49 @@
+// Prisma schema for LiteLLM key management
+generator client {
+  provider = "prisma-client-py"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model LiteLLM_VerificationToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  expires   DateTime
+  user_id   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      LiteLLM_User @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+}
+
+model LiteLLM_UserAPIKey {
+  token         String   @id @unique
+  key_name      String
+  key_alias     String?
+  user_id       String
+  team_id       String?
+  org_id        String?
+  permissions   Json?
+  expires       DateTime?
+  max_budget    Float?
+  spend         Float    @default(0.0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  soft_delete   Boolean  @default(false)
+}
+
+model LiteLLM_User {
+  user_id       String   @id @unique
+  user_email    String   @unique
+  user_role     String?
+  team_id       String?
+  organization_id String?
+  budget        Float?
+  max_budget    Float?
+  spend         Float    @default(0.0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  tokens        LiteLLM_VerificationToken[]
+}
