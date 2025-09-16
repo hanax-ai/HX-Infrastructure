@@ -89,9 +89,31 @@ klist &>/dev/null || fail "No valid Kerberos ticket after kinit"
 # Discover realm
 realm discover "${HX_REALM}" >/dev/null || fail "Failed to discover realm ${HX_REALM}"
 
+# Check if already joined to the exact domain
+check_domain_membership() {
+    local domain="$1"
+    
+    # Method 1: Check using realm list --name-only for exact match
+    if sudo realm list --name-only 2>/dev/null | grep -x "${domain}" >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # Method 2: Parse full realm list output looking for domain-name field
+    if sudo realm list 2>/dev/null | awk '/^[[:space:]]*domain-name:/ {gsub(/,/, "", $2); print $2}' | grep -x "${domain}" >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # Method 3: Check for realm name in the output (some versions show realm instead of domain)
+    if sudo realm list 2>/dev/null | awk '/^[[:space:]]*realm-name:/ {gsub(/,/, "", $2); print $2}' | grep -xi "${domain}" >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    return 1
+}
+
 # Non-interactive realm join using existing Kerberos ticket
 echo "Joining realm ${HX_REALM}..."
-if sudo realm list | grep -q "${HX_DOMAIN}"; then
+if check_domain_membership "${HX_DOMAIN}"; then
     echo "Already joined to ${HX_DOMAIN}"
 else
     sudo realm join "${HX_REALM}" --verbose || fail "Failed to join realm ${HX_REALM}"

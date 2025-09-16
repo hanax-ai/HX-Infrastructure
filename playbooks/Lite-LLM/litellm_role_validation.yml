@@ -41,6 +41,8 @@
           provider: "ollama"
           model: "llama3:8b-instruct-q8_0"
       litellm_master_key: "sk-test-master-key-for-validation"
+      litellm_request_timeout: 30
+      litellm_max_retries: 3
 
   tasks:
     # Section 1: Create evidence directory

@@ -15,120 +15,143 @@
     dc_ip: "{{ hx_dc_ip | default('192.168.10.2') }}"
     
   tasks:
-    - name: Provision keytab from secrets manager
+    - name: Domain join process with cleanup
       block:
-        # Example using HashiCorp Vault
-        - name: Retrieve keytab from Vault
-          community.hashi_vault.vault_read:
-            path: "secret/data/ad/administrator-keytab"
-          register: keytab_data
-          delegate_to: localhost
-          no_log: true
+        - name: Provision keytab from secrets manager
+          block:
+            # Example using HashiCorp Vault
+            - name: Retrieve keytab from Vault
+              community.hashi_vault.vault_read:
+                path: "secret/data/ad/administrator-keytab"
+              register: keytab_data
+              delegate_to: localhost
+              no_log: true
+              
+            - name: Write keytab to temporary location
+              copy:
+                content: "{{ keytab_data.data.data.keytab_base64 | b64decode }}"
+                dest: "{{ keytab_temp_path }}"
+                mode: '0600'
+              no_log: true
+          when: keytab_source is not defined
           
-        - name: Write keytab to temporary location
+        - name: Copy provided keytab
           copy:
-            content: "{{ keytab_data.data.data.keytab_base64 | b64decode }}"
+            src: "{{ keytab_source }}"
             dest: "{{ keytab_temp_path }}"
             mode: '0600'
-          no_log: true
-      when: keytab_source is not defined
+          when: keytab_source is defined
       
-    - name: Copy provided keytab
-      copy:
-        src: "{{ keytab_source }}"
-        dest: "{{ keytab_temp_path }}"
-        mode: '0600'
-      when: keytab_source is defined
-      
-    - name: Install required packages
-      apt:
-        name:
-          - realmd
-          - sssd
-          - sssd-tools
-          - krb5-user
-          - samba-common-bin
-          - adcli
-          - ldap-utils
-          - oddjob
-          - oddjob-mkhomedir
-        state: present
-        update_cache: yes
-      environment:
-        DEBIAN_FRONTEND: noninteractive
+        - name: Install required packages
+          apt:
+            name:
+              - realmd
+              - sssd
+              - sssd-tools
+              - krb5-user
+              - samba-common-bin
+              - adcli
+              - ldap-utils
+              - oddjob
+              - oddjob-mkhomedir
+            state: present
+            update_cache: yes
+          environment:
+            DEBIAN_FRONTEND: noninteractive
         
-    - name: Configure DNS resolver
-      command: "resolvectl dns {{ ansible_default_ipv4.interface }} {{ dc_ip }}"
-      changed_when: true
-      
-    - name: Configure DNS domain
-      command: "resolvectl domain {{ ansible_default_ipv4.interface }} {{ domain_name }}"
-      changed_when: true
-      
-    - name: Copy keytab to secure location
-      copy:
-        src: "{{ keytab_temp_path }}"
-        dest: "{{ keytab_secure_path }}"
-        owner: root
-        group: root
-        mode: '0600'
-        remote_src: yes
+        - name: Check current DNS resolver settings
+          command: "resolvectl dns {{ ansible_default_ipv4.interface }}"
+          register: current_dns
+          changed_when: false
+          failed_when: false
         
-    - name: Authenticate with keytab
-      command: "kinit -kt {{ keytab_secure_path }} administrator@{{ realm_name }}"
-      changed_when: true
+        - name: Configure DNS resolver
+          command: "resolvectl dns {{ ansible_default_ipv4.interface }} {{ dc_ip }}"
+          register: dns_result
+          changed_when: dc_ip not in current_dns.stdout
+          failed_when: 
+            - dns_result.rc != 0
+            - "'Failed' in dns_result.stderr"
       
-    - name: Verify Kerberos ticket
-      command: klist
-      register: klist_output
-      changed_when: false
-      failed_when: klist_output.rc != 0
-      
-    - name: Check if already joined to domain
-      command: realm list
-      register: realm_list
-      changed_when: false
-      
-    - name: Join domain
-      command: "realm join {{ realm_name }} --verbose"
-      when: domain_name not in realm_list.stdout
-      register: realm_join
-      failed_when: realm_join.rc != 0
-      
-    - name: Configure SSSD for AD groups
-      blockinfile:
-        path: /etc/sssd/sssd.conf
-        block: |
-          ad_gpo_access_control = permissive
-          override_homedir = /home/%u
-          override_shell = /bin/bash
-          simple_allow_groups = Domain Admins, DevOps Users
-        insertafter: "\\[domain/{{ domain_name }}\\]"
-      notify: restart sssd
-      
-    - name: Enable password authentication
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^PasswordAuthentication'
-        line: 'PasswordAuthentication yes'
-      notify: restart sshd
-      
-    - name: Configure PAM mkhomedir
-      lineinfile:
-        path: /etc/pam.d/common-session
-        line: 'session optional pam_mkhomedir.so skel=/etc/skel umask=077'
-        insertafter: 'pam_unix.so'
+        - name: Check current DNS domain settings
+          command: "resolvectl domain {{ ansible_default_ipv4.interface }}"
+          register: current_domain
+          changed_when: false
+          failed_when: false
         
-    - name: Clean up temporary keytab
-      file:
-        path: "{{ keytab_temp_path }}"
-        state: absent
-      always: true
+        - name: Configure DNS domain
+          command: "resolvectl domain {{ ansible_default_ipv4.interface }} {{ domain_name }}"
+          register: domain_result
+          changed_when: domain_name not in current_domain.stdout
+          failed_when:
+            - domain_result.rc != 0
+            - "'Failed' in domain_result.stderr"
       
-    - name: Destroy Kerberos ticket
-      command: kdestroy
-      changed_when: true
-      ignore_errors: true
+        - name: Copy keytab to secure location
+          copy:
+            src: "{{ keytab_temp_path }}"
+            dest: "{{ keytab_secure_path }}"
+            owner: root
+            group: root
+            mode: '0600'
+            remote_src: yes
+        
+        - name: Authenticate with keytab
+          command: "kinit -kt {{ keytab_secure_path }} administrator@{{ realm_name }}"
+          changed_when: true
+      
+        - name: Verify Kerberos ticket
+          command: klist
+          register: klist_output
+          changed_when: false
+          failed_when: klist_output.rc != 0
+      
+        - name: Check if already joined to domain
+          command: realm list
+          register: realm_list
+          changed_when: false
+      
+        - name: Join domain
+          command: "realm join {{ realm_name }} --verbose"
+          when: domain_name not in realm_list.stdout
+          register: realm_join
+          failed_when: realm_join.rc != 0
+      
+        - name: Configure SSSD for AD groups
+          blockinfile:
+            path: /etc/sssd/sssd.conf
+            block: |
+              ad_gpo_access_control = permissive
+              override_homedir = /home/%u
+              override_shell = /bin/bash
+              simple_allow_groups = Domain Admins, DevOps Users
+            insertafter: "\\[domain/{{ domain_name }}\\]"
+          notify: restart sssd
+      
+        - name: Enable password authentication
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^PasswordAuthentication'
+            line: 'PasswordAuthentication yes'
+          notify: restart sshd
+      
+        - name: Configure PAM mkhomedir
+          lineinfile:
+            path: /etc/pam.d/common-session
+            line: 'session optional pam_mkhomedir.so skel=/etc/skel umask=077'
+            insertafter: 'pam_unix.so'
+            
+      always:
+        - name: Clean up temporary keytab
+          file:
+            path: "{{ keytab_temp_path }}"
+            state: absent
+          when: keytab_temp_path is defined
+          
+        - name: Destroy Kerberos ticket
+          command: kdestroy
+          changed_when: true
+          ignore_errors: true
       
   handlers:
     - name: restart sssd

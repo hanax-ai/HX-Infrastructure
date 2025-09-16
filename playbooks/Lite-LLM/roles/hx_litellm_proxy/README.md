@@ -49,6 +49,24 @@ litellm_models:
 
 # Security
 litellm_master_key: ""  # Set this in vault!
+
+# SECURITY NOTE for litellm_master_key:
+# - NEVER commit the master key to source control
+# - Store in Ansible Vault or external secrets manager (HashiCorp Vault, AWS Secrets Manager, etc.)
+# - Inject via environment variables or runtime secret files with restrictive permissions
+# - Rotate regularly according to your security policy
+# - Limit access to required service accounts only
+# 
+# Example: Using Ansible Vault
+# litellm_master_key: "{{ vault_litellm_master_key }}"
+# 
+# Example: Using environment variable
+# litellm_master_key: "{{ lookup('env', 'LITELLM_MASTER_KEY') }}"
+#
+# If storing in a file on disk:
+# - Set ownership: chown {{ litellm_service_user }}:{{ litellm_service_group }}
+# - Set permissions: chmod 0600 (read/write for owner only)
+# - Store outside of version control directories
 ```
 
 ## Dependencies
@@ -86,18 +104,27 @@ systemctl restart litellm
 
 Once deployed, the LiteLLM proxy provides an OpenAI-compatible API:
 
+**Note:** Replace `<LITELLM_HOST>` and `<LITELLM_PORT>` with your configured values (defaults: `0.0.0.0` and `4000`).
+Replace `<YOUR_MASTER_KEY>` with your actual master key from the secure configuration.
+
 ```bash
 # Test the API
-curl http://localhost:4000/v1/models
+curl http://<LITELLM_HOST>:<LITELLM_PORT>/v1/models
 
 # Make a completion request
-curl http://localhost:4000/v1/chat/completions \
+curl http://<LITELLM_HOST>:<LITELLM_PORT>/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_MASTER_KEY" \
+  -H "Authorization: Bearer <YOUR_MASTER_KEY>" \
   -d '{
     "model": "phi3-3.8b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
+
+# Example with actual values (for local testing only):
+# curl http://localhost:4000/v1/chat/completions \
+#   -H "Content-Type: application/json" \
+#   -H "Authorization: Bearer sk-your-actual-key-here" \
+#   -d '{"model": "phi3-3.8b", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 ## License
