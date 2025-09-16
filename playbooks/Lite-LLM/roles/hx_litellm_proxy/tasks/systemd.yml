@@ -18,17 +18,14 @@
       Type=simple
       User={{ litellm_user }}
       Group={{ litellm_group }}
-      WorkingDirectory={{ litellm_home }}
+      WorkingDirectory={{ litellm_venv_path }}
       
       # Environment
       EnvironmentFile={{ litellm_config_dir }}/litellm.env
       Environment="PATH={{ litellm_venv_path }}/bin:/usr/local/bin:/usr/bin:/bin"
       
       # Start command
-      ExecStart={{ litellm_venv_path }}/bin/litellm \
-        --config {{ litellm_config_dir }}/config.yaml \
-        --host ${LITELLM_HOST} \
-        --port ${LITELLM_PORT}
+      ExecStart={{ litellm_venv_path }}/bin/litellm --config {{ litellm_config_dir }}/config.yaml --host ${LITELLM_HOST} --port ${LITELLM_PORT}
       
       # Restart configuration
       Restart={{ litellm_service_restart_policy }}
@@ -91,8 +88,7 @@
   changed_when: false
   failed_when: >
     service_verify.rc != 0 or
-    (service_verify.stderr is defined and service_verify.stderr | length > 0) or
-    "'Failed to load' in service_verify.stderr"
+    'Failed to load' in (service_verify.stderr | default(''))
   become: yes
 
 - name: Reload systemd daemon if service unit changed

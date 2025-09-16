@@ -1,0 +1,44 @@
+---
+# LiteLLM Group Variables
+# This file defines variables for hosts in the litellm group
+
+# Network binding configuration
+litellm_bind_host: "0.0.0.0"
+litellm_bind_port: 4000
+
+# Base URL for the service
+litellm_base_url: "http://hx-api-server.dev-test.hana-x.ai:4000"
+
+# Backend LLM servers
+litellm_backends:
+  - "http://hx-llm01-server.dev-test.hana-x.ai:11434"
+  - "http://hx-llm02-server.dev-test.hana-x.ai:11434"
+
+# Model configuration
+litellm_models:
+  - name: "phi3-3.8b"
+    provider: "ollama"
+    model: "phi3:3.8b-mini-128k-instruct-q8_0"
+  - name: "llama3-8b"
+    provider: "ollama"
+    model: "llama3:8b-instruct-q8_0"
+  - name: "llama3.1-8b"
+    provider: "ollama"
+    model: "llama3.1:8b-instruct-q8_0"
+  - name: "mistral-7b"
+    provider: "ollama"
+    model: "mistral:7b-instruct-v0.3-q8_0"
+  - name: "gemma2-9b"
+    provider: "ollama"
+    model: "gemma2:9b-instruct-q8_0"
+
+# Request settings
+litellm_request_timeout: 30
+litellm_max_retries: 3
+
+# Security - Master key should be stored in vault
+# This will be loaded from vault.yml
+litellm_master_key: "{{ vault_litellm_master_key }}"
+
+# Python version override (system has 3.12)
+litellm_python_version: "3.12"

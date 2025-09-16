@@ -8,7 +8,7 @@ litellm_home: /home/litellm
 litellm_shell: /usr/sbin/nologin
 
 # Installation paths
-litellm_venv_path: "{{ litellm_home }}/litellm-venv"
+litellm_venv_path: "/opt/litellm"
 litellm_config_dir: /etc/litellm
 litellm_log_dir: /var/log/litellm
 

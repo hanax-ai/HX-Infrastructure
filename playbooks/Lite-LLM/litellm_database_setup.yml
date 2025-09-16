@@ -1,0 +1,309 @@
+---
+# LiteLLM Database Configuration Playbook
+# Adds PostgreSQL support for virtual key management
+# SECURITY: Required for production deployment
+#
+# Security Features:
+# - Uses SCRAM-SHA-256 authentication (PostgreSQL's most secure method)
+# - No MD5 hashes (deprecated and vulnerable)
+# - All passwords stored in Ansible Vault
+#
+# Database URL Security Options:
+# 1. Environment Variable (highest precedence):
+#    export LITELLM_DATABASE_URL="postgresql://user:pass@host:port/db"
+#
+# 2. Vault Variable:
+#    In inventories/group_vars/litellm/vault.yml:
+#    vault_litellm_database_url: "postgresql://user:pass@host:port/db"
+#
+# 3. Auto-constructed (requires vault_litellm_db_password):
+#    The URL will be built from individual components
+#
+# All sensitive tasks use no_log: true to prevent credential exposure
+
+- name: Configure PostgreSQL database for LiteLLM virtual keys
+  hosts: litellm
+  become: true
+  vars:
+    postgres_version: 15  # SCRAM-SHA-256 supported since PostgreSQL 10
+    litellm_db_name: litellm
+    litellm_db_user: litellm_app
+    litellm_db_password: "{{ vault_litellm_db_password }}"
+    # Database URL can be provided via (in order of precedence):
+    # 1. Environment variable LITELLM_DATABASE_URL
+    # 2. Vault variable vault_litellm_database_url
+    # 3. Constructed from individual components
+    litellm_database_url: >-
+      {{ lookup('env', 'LITELLM_DATABASE_URL') or
+         (vault_litellm_database_url | default('') if vault_litellm_database_url is defined else
+          'postgresql://' + litellm_db_user + ':' + litellm_db_password + '@localhost:5432/' + litellm_db_name) }}
+    
+  tasks:
+    - name: Validate database password is properly configured
+      assert:
+        that:
+          - vault_litellm_db_password is defined
+          - vault_litellm_db_password | length > 0
+          - vault_litellm_db_password != 'ChangeMeImmediately123!'
+        fail_msg: |
+          CRITICAL SECURITY ERROR: Database password is not properly configured!
+          The vault_litellm_db_password variable must be defined in your vault.
+          
+          To fix this:
+          1. Generate a secure password (e.g., using 'pwgen -s 32 1' or 'openssl rand -base64 32')
+          2. Add it to your vault: ansible-vault edit inventories/group_vars/litellm/vault.yml
+          3. Set: vault_litellm_db_password: "<your-secure-password>"
+          
+          NEVER use default or hardcoded passwords in production!
+        quiet: true
+      tags: [database, security]
+      no_log: true
+
+    - name: Validate database URL configuration
+      assert:
+        that:
+          - litellm_database_url is defined
+          - litellm_database_url | length > 0
+          - "'postgresql://' in litellm_database_url"
+        fail_msg: |
+          Database URL is not properly configured!
+          
+          You can provide the database URL using one of these methods:
+          1. Set environment variable: export LITELLM_DATABASE_URL="postgresql://user:pass@host:port/db"
+          2. Add to vault: vault_litellm_database_url: "postgresql://..."
+          3. Ensure vault_litellm_db_password is set (for auto-construction)
+        quiet: true
+      tags: [database, security]
+      no_log: true
+
+    - name: Install PostgreSQL
+      apt:
+        name:
+          - "postgresql-{{ postgres_version }}"
+          - "postgresql-contrib-{{ postgres_version }}"
+          - python3-psycopg2
+        state: present
+        update_cache: true
+      tags: [database]
+
+    - name: Ensure PostgreSQL is running
+      systemd:
+        name: postgresql
+        state: started
+        enabled: true
+      tags: [database]
+
+    - name: Configure PostgreSQL to use SCRAM-SHA-256 for password encryption
+      postgresql_set:
+        name: password_encryption
+        value: scram-sha-256
+      become_user: postgres
+      notify: reload postgresql
+      tags: [database, security]
+
+    - name: Create LiteLLM database
+      postgresql_db:
+        name: "{{ litellm_db_name }}"
+        state: present
+      become_user: postgres
+      tags: [database]
+
+    - name: Create LiteLLM database user with SCRAM-SHA-256
+      postgresql_user:
+        name: "{{ litellm_db_user }}"
+        password: "{{ litellm_db_password }}"
+        db: "{{ litellm_db_name }}"
+        priv: ALL
+        state: present
+        encrypted: true
+      become_user: postgres
+      tags: [database]
+      no_log: true
+
+    - name: Ensure user password uses SCRAM-SHA-256
+      postgresql_query:
+        db: postgres
+        query: |
+          ALTER ROLE {{ litellm_db_user }} 
+          PASSWORD '{{ litellm_db_password }}';
+      become_user: postgres
+      changed_when: false
+      tags: [database, security]
+      no_log: true
+
+    - name: Update pg_hba.conf for SCRAM-SHA-256 authentication
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+        contype: local
+        databases: "{{ litellm_db_name }}"
+        users: "{{ litellm_db_user }}"
+        method: scram-sha-256
+        state: present
+      notify: reload postgresql
+      tags: [database]
+
+    - name: Backup current LiteLLM config
+      copy:
+        src: /etc/litellm/config.yaml
+        dest: "/etc/litellm/config.yaml.{{ ansible_date_time.epoch }}.bak"
+        remote_src: true
+    - name: Save virtual key information
+      block:
+        - name: Ensure keys directory exists with secure permissions
+          file:
+            path: "{{ playbook_dir }}/.keys"
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+
+        - name: Save key information
+          copy:
+            content: |
+              # LiteLLM Virtual Keys Generated
+              # Date: {{ ansible_date_time.iso8601 }}
+              # WARNING: Store these securely and never commit to git!
+              
+              ## Open WebUI Key
+              Key: {{ webui_key.json.key }}
+              Alias: {{ webui_key.json.key_alias }}
+              Expires: {{ webui_key.json.expires }}
+              
+              ## Usage
+              export OPENAI_API_KEY="{{ webui_key.json.key }}"
+              
+              ## Next Steps
+              1. Update Open WebUI environment file with this key
+              2. Remove master key from all client configurations
+              3. Rotate master key for security
+            dest: "{{ playbook_dir }}/.keys/litellm_virtual_keys.txt"
+            mode: '0600'
+          delegate_to: localhost
+      tags: [keys]
+      no_log: true
+              
+              ## Next Steps
+              1. Update Open WebUI environment file with this key
+              2. Remove master key from all client configurations
+              3. Rotate master key for security
+            dest: "{{ playbook_dir }}/.keys/litellm_virtual_keys.txt"
+            mode: '0600'
+          delegate_to: localhost
+      tags: [keys]
+      no_log: true
+      no_log: true
+
+    - name: Display database test result
+      debug:
+        msg: "Database connection successful: {{ db_test.query_result[0].version }}"
+      tags: [test]
+
+  handlers:
+    - name: reload postgresql
+      systemd:
+        name: postgresql
+        state: reloaded
+
+    - name: restart litellm
+      systemd:
+        name: litellm
+        state: restarted
+      register: litellm_restart
+
+    - name: wait for litellm to be ready
+      wait_for:
+        port: "{{ litellm_bind_port | default(4000) }}"
+        delay: 5
+        timeout: 30
+      when: litellm_restart.changed
+
+- name: Generate virtual keys for clients
+  hosts: localhost
+  gather_facts: false
+  vars:
+    litellm_master_key: "{{ vault_litellm_master_key }}"
+    litellm_api_base: "http://hx-api-server.dev-test.hana-x.ai:4000"
+    
+  tasks:
+    - name: Validate LiteLLM master key is properly configured
+      assert:
+        that:
+          - vault_litellm_master_key is defined
+          - vault_litellm_master_key | length > 0
+          - vault_litellm_master_key != 'sk-1234567890abcdef-test-key-please-replace'
+        fail_msg: |
+          CRITICAL SECURITY ERROR: LiteLLM master key is not properly configured!
+          The vault_litellm_master_key variable must be defined in your vault.
+          This is required for secure API key management.
+          
+          To fix this:
+          1. Generate a secure master key (e.g., using 'openssl rand -hex 32')
+          2. Add it to your vault: ansible-vault edit inventories/group_vars/litellm/vault.yml
+          3. Set: vault_litellm_master_key: "sk-<your-secure-key>"
+        quiet: true
+      tags: [keys, security]
+
+    - name: Wait for LiteLLM to be ready with database
+      uri:
+        url: "{{ litellm_api_base }}/health"
+        status_code: 200
+      retries: 10
+      delay: 3
+      tags: [keys]
+
+    - name: Generate virtual key for Open WebUI
+      uri:
+        url: "{{ litellm_api_base }}/key/generate"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ litellm_master_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          key_alias: "open-webui-production"
+          duration: "90d"
+          models: ["phi3-3.8b", "llama3-8b", "llama3.1-8b", "mistral-7b", "gemma2-9b"]
+          max_budget: 1000
+          metadata:
+            client: "open-webui"
+            environment: "production"
+            created_by: "ansible"
+      register: webui_key
+      tags: [keys]
+
+    - name: Save virtual key information
+      copy:
+        content: |
+          # LiteLLM Virtual Keys Generated
+          # Date: {{ ansible_date_time.iso8601 }}
+          # WARNING: Store these securely and never commit to git!
+          
+          ## Open WebUI Key
+          Key: {{ webui_key.json.key }}
+          Alias: {{ webui_key.json.key_alias }}
+          Expires: {{ webui_key.json.expires }}
+          
+          ## Usage
+          export OPENAI_API_KEY="{{ webui_key.json.key }}"
+          
+          ## Next Steps
+          1. Update Open WebUI environment file with this key
+          2. Remove master key from all client configurations
+          3. Rotate master key for security
+        dest: "{{ playbook_dir }}/.keys/litellm_virtual_keys.txt"
+        mode: '0600'
+      delegate_to: localhost
+      tags: [keys]
+
+    - name: Display next steps
+      debug:
+        msg: |
+          ✅ Database configured successfully!
+          ✅ Virtual key generated for Open WebUI!
+          
+          📋 Next Steps:
+          1. Key saved to: {{ playbook_dir }}/.keys/litellm_virtual_keys.txt
+          2. Update Open WebUI with: {{ webui_key.json.key }}
+          3. Rotate master key after all clients updated
+          
+          ⚠️  Security: Never share or commit these keys!
+      tags: [keys]

@@ -95,10 +95,10 @@
                 model: {{ m.model | quote }}
                 api_base: {{ b | quote }}
                 api_key: ""
-                request_timeout: 30
+                request_timeout: {{ litellm_request_timeout | default(30) }}
                 mode: "chat"
               max_input_tokens: 2048
-              num_retries: 2
+              num_retries: {{ litellm_max_retries | default(3) }}
           {% endfor %}
           {% endfor %}
           

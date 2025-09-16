@@ -1,6 +1,13 @@
 ---
 # Main tasks for hx_litellm_proxy role
 
+- name: Ensure service group exists
+  ansible.builtin.group:
+    name: "{{ litellm_group }}"
+    system: yes
+    state: present
+  become: yes
+
 - name: Ensure service user exists
   ansible.builtin.user:
     name: "{{ litellm_user }}"
@@ -23,6 +30,15 @@
     state: present
     update_cache: yes
     cache_valid_time: 3600
+  become: yes
+
+- name: Create virtual environment directory
+  ansible.builtin.file:
+    path: "{{ litellm_venv_path }}"
+    state: directory
+    owner: "{{ litellm_user }}"
+    group: "{{ litellm_group }}"
+    mode: '0755'
   become: yes
 
 - name: Create virtual environment
@@ -79,7 +95,7 @@
     src: litellm.env.j2
     dest: "{{ litellm_config_dir }}/litellm.env"
     owner: root
-    group: root
+    group: "{{ litellm_group }}"
     mode: "{{ litellm_env_mode }}"
   become: yes
   notify:
@@ -90,7 +106,7 @@
     src: litellm.config.yaml.j2
     dest: "{{ litellm_config_dir }}/config.yaml"
     owner: root
-    group: root
+    group: "{{ litellm_group }}"
     mode: "{{ litellm_config_mode }}"
     validate: "{{ litellm_venv_path }}/bin/python -c 'import yaml; yaml.safe_load(open(\"%s\"))'"
   become: yes

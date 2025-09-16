@@ -69,8 +69,8 @@
     - name: "DNS | Validate A records"
       ansible.builtin.assert:
         that:
-          - "item.expected_ip in lookup('dig', item.hostname + '/A', '@' + dns_server) if dns_server else item.expected_ip in lookup('dig', item.hostname + '/A')"
-        success_msg: "A record for {{ item.hostname }} resolves to {{ item.expected_ip }}{{ ' (using DNS server: ' + dns_server + ')' if dns_server else ' (using system resolver)' }}"
+          - "(dns_server is defined and dns_server and item.expected_ip in lookup('dig', item.hostname + '/A', '@' + dns_server)) or (item.expected_ip in lookup('dig', item.hostname + '/A'))"
+        success_msg: "A record for {{ item.hostname }} resolves to {{ item.expected_ip }}{{ ' (using DNS server: ' + dns_server + ')' if dns_server is defined and dns_server else ' (using system resolver)' }}"
         fail_msg: "A record for {{ item.hostname }} is missing or incorrect"
       loop: "{{ dns_checks }}"
       loop_control:
@@ -80,8 +80,8 @@
     - name: "DNS | Validate PTR records"
       ansible.builtin.assert:
         that:
-          - "(item.hostname + '.' in lookup('dig', item.expected_ip + '/PTR', '@' + dns_server)) if dns_server else (item.hostname + '.' in lookup('dig', item.expected_ip + '/PTR'))"
-        success_msg: "PTR record for {{ item.expected_ip }} resolves to {{ item.hostname }}{{ ' (using DNS server: ' + dns_server + ')' if dns_server else ' (using system resolver)' }}"
+          - "(dns_server is defined and dns_server and item.hostname + '.' in lookup('dig', item.expected_ip + '/PTR', '@' + dns_server)) or (item.hostname + '.' in lookup('dig', item.expected_ip + '/PTR'))"
+        success_msg: "PTR record for {{ item.expected_ip }} resolves to {{ item.hostname }}{{ ' (using DNS server: ' + dns_server + ')' if dns_server is defined and dns_server else ' (using system resolver)' }}"
         fail_msg: "PTR record for {{ item.expected_ip }} is missing or incorrect"
       loop: "{{ dns_checks }}"
       loop_control:

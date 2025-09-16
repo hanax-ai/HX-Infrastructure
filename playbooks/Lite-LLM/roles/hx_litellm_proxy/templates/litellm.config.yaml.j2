@@ -7,7 +7,7 @@ model_list:
 {%   for b in litellm_backends %}
   - model_name: {{ m.name | quote }}
     litellm_params:
-      model: {{ m.model | quote }}
+      model: {{ m.provider | default('ollama') }}/{{ m.model | quote }}
       api_base: {{ b | quote }}
       api_key: ""  # Ollama doesn't require API key
       request_timeout: 30
@@ -18,12 +18,8 @@ model_list:
 {% endfor %}
 
 router_settings:
-  timeout: 60
-  retry_policy: "simple"
   routing_strategy: "least-busy"
-  cooldown_time: 30
-  num_retries: 3
-  allowed_fails: 5
+  request_timeout: 30
   
   # Health check settings
   health_check_interval: 60
