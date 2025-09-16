@@ -29,8 +29,12 @@ general_settings:
   # Authentication
   master_key: {{ litellm_master_key | quote }}
   
-  # Database (optional, for key management)
-  # database_url: "postgresql://user:pass@host:port/db"
+  # Database (for virtual key management)
+{% if litellm_database_url is defined %}
+  database_url: {{ litellm_database_url | quote }}
+{% else %}
+  database_url: "postgresql://{{ litellm_db_user }}:{{ litellm_db_password }}@{{ litellm_db_host }}:{{ litellm_db_port | default(5432) }}/{{ litellm_db_name }}"
+{% endif %}
   
   # Telemetry
   telemetry: false

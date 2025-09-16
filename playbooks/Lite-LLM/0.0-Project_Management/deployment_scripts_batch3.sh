@@ -147,15 +147,28 @@ fi
 
 echo "API key validation passed"
 
+# Create secure temporary file for API key
+API_KEY_FILE=$(mktemp -t litellm_api_key.XXXXXX)
+chmod 600 "${API_KEY_FILE}"
+echo "Authorization: Bearer ${LITELLM_API_KEY}" > "${API_KEY_FILE}"
+
+# Cleanup function to ensure secure file is removed
+cleanup_api_key() {
+    if [[ -f "${API_KEY_FILE}" ]]; then
+        shred -u "${API_KEY_FILE}" 2>/dev/null || rm -f "${API_KEY_FILE}"
+    fi
+}
+trap cleanup_api_key EXIT
+
 # List models via the gateway
 echo -e "\n9A.1) Listing models via gateway:"
-curl -fsS -H "Authorization: Bearer ${LITELLM_API_KEY}" \
+curl -fsS -H @"${API_KEY_FILE}" \
   http://hx-api-server.dev-test.hana-x.ai:4000/v1/models | jq .
 
 # Minimal chat completion via the gateway
 echo -e "\n9A.2) Chat completion test:"
 curl -fsS -X POST http://hx-api-server.dev-test.hana-x.ai:4000/v1/chat/completions \
-  -H "Authorization: Bearer ${LITELLM_API_KEY}" \
+  -H @"${API_KEY_FILE}" \
   -H "Content-Type: application/json" \
   -d '{
         "model": "phi3-3.8b",
@@ -198,7 +211,6 @@ print("Chat:", json.dumps(resp.model_dump(), indent=2))
 PY
 
 # Run the script
-export LITELLM_API_KEY="sk-1234567890abcdef-test-key-please-replace"
 ~/litellm-client-venv/bin/python ~/litellm_client_test.py
 
 echo -e "\n================================================"
@@ -206,6 +218,9 @@ echo "Integration Complete!"
 echo "Open WebUI is now configured to use LiteLLM gateway"
 echo "Backup saved at: ${OPENWEBUI_ENV_BACKUP_PATH}"
 echo "================================================"
+
+# Clean up API key file before disabling traps
+cleanup_api_key
 
 # Disable all traps on successful completion
 trap - ERR EXIT

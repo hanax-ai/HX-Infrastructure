@@ -35,7 +35,8 @@ EVID=~/hx-ansible/.evidence/litellm/$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$EVID"
 
 # TEMPORARY: Using master key until database is configured
 # TODO: Replace with virtual key after database setup
-export TEMP_API_KEY="sk-1234567890abcdef-test-key-please-replace"
+# Generate cryptographically secure random key at runtime
+export TEMP_API_KEY="sk-$(openssl rand -hex 32)"
 
 # Document security concern in evidence
 cat > "$EVID/SECURITY_NOTE.txt" << EOF

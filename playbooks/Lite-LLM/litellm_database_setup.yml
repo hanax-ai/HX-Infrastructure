@@ -25,7 +25,7 @@
   hosts: litellm
   become: true
   vars:
-    postgres_version: 15  # SCRAM-SHA-256 supported since PostgreSQL 10
+    postgres_version: 17  # SCRAM-SHA-256 supported since PostgreSQL 10
     litellm_db_name: litellm
     litellm_db_user: litellm_app
     litellm_db_password: "{{ vault_litellm_db_password }}"
@@ -33,10 +33,12 @@
     # 1. Environment variable LITELLM_DATABASE_URL
     # 2. Vault variable vault_litellm_database_url
     # 3. Constructed from individual components
+    postgres_host: hx-postgres-server.dev-test.hana-x.ai
+    postgres_port: 5432
     litellm_database_url: >-
       {{ lookup('env', 'LITELLM_DATABASE_URL') or
          (vault_litellm_database_url | default('') if vault_litellm_database_url is defined else
-          'postgresql://' + litellm_db_user + ':' + litellm_db_password + '@localhost:5432/' + litellm_db_name) }}
+          'postgresql://' + litellm_db_user + ':' + litellm_db_password + '@' + postgres_host + ':' + postgres_port | string + '/' + litellm_db_name) }}
     
   tasks:
     - name: Validate database password is properly configured
@@ -76,41 +78,42 @@
       tags: [database, security]
       no_log: true
 
-    - name: Install PostgreSQL
+    - name: Install PostgreSQL client packages
       apt:
         name:
-          - "postgresql-{{ postgres_version }}"
-          - "postgresql-contrib-{{ postgres_version }}"
+          - "postgresql-client-{{ postgres_version }}"
           - python3-psycopg2
+          - python3-pip
         state: present
         update_cache: true
-      tags: [database]
+      tags: [client]
 
-    - name: Ensure PostgreSQL is running
-      systemd:
-        name: postgresql
-        state: started
-        enabled: true
-      tags: [database]
+    - name: Install psycopg2-binary in LiteLLM virtual environment
+      pip:
+        name: psycopg2-binary
+        virtualenv: /opt/litellm/venv
+        virtualenv_python: python3
+      tags: [client]
 
-    - name: Configure PostgreSQL to use SCRAM-SHA-256 for password encryption
-      postgresql_set:
-        name: password_encryption
-        value: scram-sha-256
-      become_user: postgres
-      notify: reload postgresql
-      tags: [database, security]
+    # Note: Database creation and user management should be done on hx-postgres-server
+    # This playbook assumes the database and user already exist
+    - name: Verify PostgreSQL connection from API server
+      postgresql_query:
+        db: "{{ litellm_db_name }}"
+        login_host: "{{ postgres_host }}"
+        login_port: "{{ postgres_port }}"
+        login_user: "{{ litellm_db_user }}"
+        login_password: "{{ litellm_db_password }}"
+        query: "SELECT version();"
+      register: db_connection_test
+      changed_when: false
+      tags: [test]
+      no_log: true
 
-    - name: Create LiteLLM database
-      postgresql_db:
-        name: "{{ litellm_db_name }}"
-        state: present
-      become_user: postgres
-      tags: [database]
-
-    - name: Create LiteLLM database user with SCRAM-SHA-256
-      postgresql_user:
-        name: "{{ litellm_db_user }}"
+    - name: Display connection test result
+      debug:
+        msg: "Successfully connected to PostgreSQL on {{ postgres_host }}: {{ db_connection_test.query_result[0].version }}"
+      tags: [test]
         password: "{{ litellm_db_password }}"
         db: "{{ litellm_db_name }}"
         priv: ALL
@@ -147,6 +150,8 @@
         src: /etc/litellm/config.yaml
         dest: "/etc/litellm/config.yaml.{{ ansible_date_time.epoch }}.bak"
         remote_src: true
+      tags: [config]
+
     - name: Save virtual key information
       block:
         - name: Ensure keys directory exists with secure permissions
@@ -180,17 +185,15 @@
           delegate_to: localhost
       tags: [keys]
       no_log: true
-              
-              ## Next Steps
-              1. Update Open WebUI environment file with this key
-              2. Remove master key from all client configurations
-              3. Rotate master key for security
-            dest: "{{ playbook_dir }}/.keys/litellm_virtual_keys.txt"
-            mode: '0600'
-          delegate_to: localhost
-      tags: [keys]
-      no_log: true
-      no_log: true
+
+    - name: Test database connection
+      postgresql_query:
+        db: "{{ litellm_db_name }}"
+        login_user: "{{ litellm_db_user }}"
+        login_password: "{{ litellm_db_password }}"
+        query: "SELECT version();"
+      register: db_test
+      tags: [test]
 
     - name: Display database test result
       debug:
@@ -268,30 +271,6 @@
             environment: "production"
             created_by: "ansible"
       register: webui_key
-      tags: [keys]
-
-    - name: Save virtual key information
-      copy:
-        content: |
-          # LiteLLM Virtual Keys Generated
-          # Date: {{ ansible_date_time.iso8601 }}
-          # WARNING: Store these securely and never commit to git!
-          
-          ## Open WebUI Key
-          Key: {{ webui_key.json.key }}
-          Alias: {{ webui_key.json.key_alias }}
-          Expires: {{ webui_key.json.expires }}
-          
-          ## Usage
-          export OPENAI_API_KEY="{{ webui_key.json.key }}"
-          
-          ## Next Steps
-          1. Update Open WebUI environment file with this key
-          2. Remove master key from all client configurations
-          3. Rotate master key for security
-        dest: "{{ playbook_dir }}/.keys/litellm_virtual_keys.txt"
-        mode: '0600'
-      delegate_to: localhost
       tags: [keys]
 
     - name: Display next steps

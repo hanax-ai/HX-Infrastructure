@@ -1,0 +1,171 @@
+---
+# LiteLLM Database Server Setup
+# Sets up the database and user on the PostgreSQL server
+# Must run before client setup playbook
+#
+# This playbook:
+# 1. Creates the litellm database
+# 2. Creates the litellm_app user with SCRAM-SHA-256 password
+# 3. Updates pg_hba.conf to allow connections from API server
+# 4. Grants necessary permissions
+
+- name: Configure PostgreSQL server for LiteLLM
+  hosts: hx-postgres-server.dev-test.hana-x.ai
+  become: true
+  gather_facts: true
+  vars:
+    postgres_version: 17
+    litellm_db_name: litellm
+    litellm_db_user: litellm_app
+    # Load password from litellm group vars
+    litellm_db_password: "{{ hostvars[groups['litellm'][0]]['vault_litellm_db_password'] }}"
+    api_server_ip: "192.168.10.5"  # hx-api-server IP
+    
+  pre_tasks:
+    - name: Validate database password is configured
+      assert:
+        that:
+          - litellm_db_password is defined
+          - litellm_db_password | length > 0
+        fail_msg: "Database password must be set in vault"
+      tags: [validation]
+
+    - name: Create backup directory
+      file:
+        path: /var/backups/postgresql
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0750'
+      tags: [backup]
+
+    - name: Backup pg_hba.conf before changes
+      copy:
+        src: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+        dest: "/var/backups/postgresql/pg_hba.conf.{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+        remote_src: true
+        owner: postgres
+        group: postgres
+        mode: '0640'
+      tags: [backup]
+
+  tasks:
+    - name: Check if database exists
+      postgresql_query:
+        db: postgres
+        query: "SELECT 1 FROM pg_database WHERE datname='{{ litellm_db_name }}'"
+      become_user: postgres
+      register: db_exists
+      changed_when: false
+      tags: [database]
+
+    - name: Create LiteLLM database
+      postgresql_db:
+        name: "{{ litellm_db_name }}"
+        encoding: UTF-8
+        lc_collate: en_US.UTF-8
+        lc_ctype: en_US.UTF-8
+        state: present
+      become_user: postgres
+      when: db_exists.query_result | length == 0
+      tags: [database]
+
+    - name: Check if user exists
+      postgresql_query:
+        db: postgres
+        query: "SELECT 1 FROM pg_roles WHERE rolname='{{ litellm_db_user }}'"
+      become_user: postgres
+      register: user_exists
+      changed_when: false
+      tags: [database]
+
+    - name: Create LiteLLM database user
+      postgresql_user:
+        name: "{{ litellm_db_user }}"
+        password: "{{ litellm_db_password }}"
+        state: present
+        encrypted: true
+      become_user: postgres
+      when: user_exists.query_result | length == 0
+      tags: [database]
+      no_log: true
+
+    - name: Ensure user password uses SCRAM-SHA-256
+      postgresql_query:
+        db: postgres
+        query: |
+          ALTER ROLE {{ litellm_db_user }} 
+          PASSWORD '{{ litellm_db_password }}';
+      become_user: postgres
+      changed_when: false
+      tags: [database, security]
+      no_log: true
+
+    - name: Grant database permissions to user
+      postgresql_privs:
+        db: postgres
+        privs: ALL
+        type: database
+        obj: "{{ litellm_db_name }}"
+        roles: "{{ litellm_db_user }}"
+        state: present
+      become_user: postgres
+      tags: [database]
+
+    - name: Grant schema permissions
+      postgresql_privs:
+        db: "{{ litellm_db_name }}"
+        privs: ALL
+        type: schema
+        obj: public
+        roles: "{{ litellm_db_user }}"
+        state: present
+      become_user: postgres
+      tags: [database]
+
+    - name: Add pg_hba.conf entry for API server (SCRAM-SHA-256)
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+        contype: hostssl
+        databases: "{{ litellm_db_name }}"
+        users: "{{ litellm_db_user }}"
+        source: "{{ api_server_ip }}/32"
+        method: scram-sha-256
+        state: present
+      notify: reload postgresql
+      tags: [database, security]
+
+    - name: Also allow GSSAPI-encrypted connections from API server
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+        contype: hostgssenc
+        databases: "{{ litellm_db_name }}"
+        users: "{{ litellm_db_user }}"
+        source: "{{ api_server_ip }}/32"
+        method: scram-sha-256
+        state: present
+      notify: reload postgresql
+      tags: [database, security]
+
+    - name: Test database connection
+      postgresql_query:
+        db: "{{ litellm_db_name }}"
+        query: "SELECT version();"
+      become_user: postgres
+      register: db_test
+      tags: [test]
+
+    - name: Display database test result
+      debug:
+        msg: |
+          ✅ Database configured successfully!
+          Database: {{ litellm_db_name }}
+          User: {{ litellm_db_user }}
+          PostgreSQL Version: {{ db_test.query_result[0].version }}
+      tags: [test]
+
+  handlers:
+    - name: reload postgresql
+      systemd:
+        name: postgresql
+        state: reloaded

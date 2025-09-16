@@ -14,6 +14,9 @@ hostssl   all           {{ hx_pg_gss_user }}   {{ hx_pg_subnet }}   gss include_
 hostgssenc {{ hx_pg_db }} {{ hx_pg_app_user }} {{ hx_pg_subnet }}   scram-sha-256
 hostssl   {{ hx_pg_db }} {{ hx_pg_app_user }} {{ hx_pg_subnet }}    scram-sha-256
 
+# LAN — LiteLLM app to its dedicated database via SCRAM
+hostssl    litellm      litellm_app     {{ hx_pg_subnet }}         scram-sha-256
+
 {% if hx_pg_hardening_reject_nossl %}
 # Explicitly reject non-TLS from anywhere (belt & suspenders)
 hostnossl all all 0.0.0.0/0 reject

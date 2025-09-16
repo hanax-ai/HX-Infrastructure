@@ -1,0 +1,166 @@
+---
+# LiteLLM Database Client Configuration Playbook
+# Configures the API server to connect to the existing PostgreSQL database
+# This playbook does NOT install or manage PostgreSQL server
+#
+# Prerequisites:
+# - PostgreSQL 17 is already running on hx-postgres-server
+# - Database 'litellm' already exists
+# - Database user 'litellm_app' already exists with proper permissions
+
+- name: Configure LiteLLM API server as PostgreSQL client
+  hosts: litellm
+  become: true
+  gather_facts: true  # Required for ansible_distribution_release
+  vars:
+    postgres_version: 17
+    postgres_host: hx-postgres-server.dev-test.hana-x.ai
+    postgres_port: 5432
+    litellm_db_name: litellm
+    litellm_db_user: litellm_app
+    litellm_db_password: "{{ vault_litellm_db_password }}"
+    litellm_venv_path: /opt/litellm/venv
+    # Construct database URL for LiteLLM configuration
+    litellm_database_url: >-
+      {{ lookup('env', 'LITELLM_DATABASE_URL') or
+         'postgresql://' + litellm_db_user + ':' + litellm_db_password + '@' + postgres_host + ':' + (postgres_port | string) + '/' + litellm_db_name }}
+    
+  tasks:
+    - name: Validate database password is configured
+      assert:
+        that:
+          - vault_litellm_db_password is defined
+          - vault_litellm_db_password | length > 0
+        fail_msg: "Database password must be set in vault"
+
+    - name: Ensure required directories exist for PostgreSQL repo
+      file:
+        path: /usr/share/postgresql-common/pgdg
+        state: directory
+        mode: '0755'
+      tags: [repo]
+
+    - name: Add PostgreSQL PGDG repository signing key
+      get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+        mode: '0644'
+      tags: [repo]
+
+    - name: Add PostgreSQL PGDG repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        state: present
+        filename: pgdg
+        update_cache: true
+      tags: [repo]
+
+    - name: Install PostgreSQL client packages only
+      apt:
+        name:
+          - "postgresql-client-{{ postgres_version }}"
+          - python3-psycopg2  # For Ansible PostgreSQL modules
+          - python3-pip
+          - python3-venv
+          - python3-virtualenv
+        state: present
+        update_cache: true
+      tags: [client]
+
+    - name: Create LiteLLM virtual environment
+      command: "python3 -m venv {{ litellm_venv_path }}"
+      become: true
+      become_user: litellm
+      args:
+        creates: "{{ litellm_venv_path }}/bin/python"
+      tags: [client]
+
+    - name: Install psycopg2-binary in LiteLLM virtual environment
+      command: "{{ litellm_venv_path }}/bin/pip install psycopg2-binary"
+      become: true
+      become_user: litellm
+      args:
+        creates: "{{ litellm_venv_path }}/lib/python*/site-packages/psycopg2"
+      tags: [client]
+
+    - name: Test database connectivity from API server
+      postgresql_query:
+        db: "{{ litellm_db_name }}"
+        login_host: "{{ postgres_host }}"
+        login_port: "{{ postgres_port }}"
+        login_user: "{{ litellm_db_user }}"
+        login_password: "{{ litellm_db_password }}"
+        query: "SELECT version();"
+      register: db_test
+      changed_when: false
+      tags: [test]
+
+    - name: Display database connection status
+      debug:
+        msg: |
+          Successfully connected to PostgreSQL!
+          Host: {{ postgres_host }}
+          Database: {{ litellm_db_name }}
+          Version: {{ db_test.query_result[0].version }}
+      tags: [test]
+
+    - name: Update LiteLLM configuration with database URL
+      blockinfile:
+        path: /etc/litellm/config.yaml
+        marker: "# {mark} ANSIBLE MANAGED - DATABASE CONFIG"
+        block: |
+          # PostgreSQL database for virtual key management
+          database_url: "{{ litellm_database_url }}"
+          database_type: "postgres"
+      notify: restart litellm
+      tags: [config]
+
+    - name: Test LiteLLM API with database backend
+      uri:
+        url: "http://localhost:4000/health"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ vault_litellm_master_key }}"
+        status_code: 200
+      retries: 3
+      delay: 5
+      register: health_check
+      tags: [test]
+
+    - name: Generate virtual key for testing (requires master key)
+      uri:
+        url: "http://localhost:4000/key/generate"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ vault_litellm_master_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          key_alias: "test-key-{{ ansible_date_time.epoch }}"
+          duration: "7d"
+          models: ["phi3-3.8b"]
+          max_budget: 10
+        status_code: 200
+      register: test_key
+      when: health_check is success
+      tags: [test]
+
+    - name: Display test results
+      debug:
+        msg: |
+          Database client setup complete!
+          - PostgreSQL client installed
+          - psycopg2-binary installed in venv
+          - Database connection verified
+          - LiteLLM configured with database URL
+          {% if test_key is defined and test_key.json is defined %}
+          - Virtual key generation working
+          {% endif %}
+      tags: [test]
+
+  handlers:
+    - name: restart litellm
+      systemd:
+        name: litellm
+        state: restarted
+        daemon_reload: true

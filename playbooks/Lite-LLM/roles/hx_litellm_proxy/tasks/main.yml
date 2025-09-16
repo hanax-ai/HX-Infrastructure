@@ -1,159 +1,49 @@
 ---
-# Main tasks for hx_litellm_proxy role
-
-- name: Ensure service group exists
-  ansible.builtin.group:
-    name: "{{ litellm_group }}"
-    system: yes
-    state: present
-  become: yes
-
-- name: Ensure service user exists
-  ansible.builtin.user:
-    name: "{{ litellm_user }}"
-    group: "{{ litellm_group }}"
-    home: "{{ litellm_home }}"
-    shell: "{{ litellm_shell }}"
-    create_home: yes
-    system: yes
-    state: present
-  become: yes
+- name: Ensure service user and group
+  user: { name: litellm, shell: /usr/sbin/nologin, create_home: false }
 
 - name: Install runtime prerequisites
-  ansible.builtin.apt:
-    name:
-      - "python{{ litellm_python_version }}"
-      - "python{{ litellm_python_version }}-venv"
-      - python3-pip
-      - python3-dev
-      - build-essential
+  apt:
+    name: [python3.12-venv, python3-pip, python3-psycopg2]
     state: present
-    update_cache: yes
-    cache_valid_time: 3600
-  become: yes
+    update_cache: true
 
-- name: Create virtual environment directory
-  ansible.builtin.file:
-    path: "{{ litellm_venv_path }}"
+- name: Create application directory and cache with correct ownership
+  file:
+    path: "{{ item }}"
     state: directory
-    owner: "{{ litellm_user }}"
-    group: "{{ litellm_group }}"
     mode: '0755'
-  become: yes
+    owner: litellm
+    group: litellm
+  loop:
+    - /opt/litellm
+    - /opt/litellm/.cache
 
-- name: Create virtual environment
-  ansible.builtin.command:
-    cmd: "python{{ litellm_python_version }} -m venv {{ litellm_venv_path }}"
-    creates: "{{ litellm_venv_path }}/bin/activate"
-  become: yes
-  become_user: "{{ litellm_user }}"
+- name: Create venv as the litellm user
+  become: true
+  become_user: litellm
+  command: python3.12 -m venv /opt/litellm
+  args: { creates: /opt/litellm/bin/activate }
 
-- name: Upgrade pip in virtual environment
-  ansible.builtin.pip:
-    name:
-      - pip>=21.0,<25.0
-      - setuptools>=60.0,<70.0
-      - wheel>=0.37,<1.0
-    state: present
-    virtualenv: "{{ litellm_venv_path }}"
-    virtualenv_command: "python{{ litellm_python_version }} -m venv"
-  become: yes
-  become_user: "{{ litellm_user }}"
-
-- name: Install/upgrade LiteLLM with proxy extras
-  ansible.builtin.pip:
-    name: "litellm[proxy]{% if litellm_version != 'latest' %}=={{ litellm_version }}{% endif %}"
-    state: "{{ 'latest' if litellm_version == 'latest' else 'present' }}"
-    virtualenv: "{{ litellm_venv_path }}"
-    virtualenv_command: "python{{ litellm_python_version }} -m venv"
-    extra_args: "{{ litellm_pip_extra_args }}"
-  become: yes
-  become_user: "{{ litellm_user }}"
-  notify:
-    - restart litellm
+- name: Install/upgrade LiteLLM and its database dependencies
+  command: /opt/litellm/bin/pip install --upgrade "litellm[proxy]" psycopg2-binary prisma PyYAML
+  become: true
+  become_user: litellm
 
 - name: Create configuration directory
-  ansible.builtin.file:
-    path: "{{ litellm_config_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: '0755'
-  become: yes
+  file: { path: /etc/litellm, state: directory, mode: '0755' }
 
-- name: Create log directory
-  ansible.builtin.file:
-    path: "{{ litellm_log_dir }}"
-    state: directory
-    owner: "{{ litellm_user }}"
-    group: "{{ litellm_group }}"
-    mode: '0755'
-  become: yes
-
-- name: Deploy environment file
-  ansible.builtin.template:
-    src: litellm.env.j2
-    dest: "{{ litellm_config_dir }}/litellm.env"
+- name: Render env file and proxy config with correct permissions
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: '0640'
     owner: root
-    group: "{{ litellm_group }}"
-    mode: "{{ litellm_env_mode }}"
-  become: yes
-  notify:
-    - restart litellm
-
-- name: Deploy proxy configuration
-  ansible.builtin.template:
-    src: litellm.config.yaml.j2
-    dest: "{{ litellm_config_dir }}/config.yaml"
-    owner: root
-    group: "{{ litellm_group }}"
-    mode: "{{ litellm_config_mode }}"
-    validate: "{{ litellm_venv_path }}/bin/python -c 'import yaml; yaml.safe_load(open(\"%s\"))'"
-  become: yes
-  notify:
-    - validate litellm config
-    - restart litellm
+    group: litellm
+  loop:
+    - { src: 'litellm.env.j2', dest: '/etc/litellm/litellm.env' }
+    - { src: 'litellm.config.yaml.j2', dest: '/etc/litellm/config.yaml' }
+  notify: Restart litellm
 
 - name: Configure systemd service
   ansible.builtin.include_tasks: systemd.yml
-
-- name: Ensure service is started and enabled
-  ansible.builtin.systemd:
-    name: "{{ litellm_service_name }}"
-    state: started
-    enabled: yes
-    daemon_reload: yes
-  become: yes
-
-- name: Wait for service to be ready
-  ansible.builtin.wait_for:
-    host: "{{ litellm_bind_host }}"
-    port: "{{ litellm_bind_port }}"
-    delay: 3
-    timeout: 30
-    state: started
-  when: litellm_bind_host != "0.0.0.0"
-
-- name: Wait for service to be ready (any interface)
-  ansible.builtin.wait_for:
-    port: "{{ litellm_bind_port }}"
-    delay: 3
-    timeout: 30
-    state: started
-  when: litellm_bind_host == "0.0.0.0"
-
-- name: Verify service is listening
-  ansible.builtin.shell: |
-    ss -ltn | awk '{print $4}' | grep -q ':{{ litellm_bind_port }}$'
-  register: port_check
-  changed_when: false
-  failed_when: port_check.rc != 0
-  become: yes
-
-- name: Display service status
-  ansible.builtin.debug:
-    msg: |
-      LiteLLM proxy service deployed successfully!
-      Service: {{ litellm_service_name }}
-      Listening on: {{ litellm_bind_host }}:{{ litellm_bind_port }}
-      Base URL: {{ litellm_base_url }}

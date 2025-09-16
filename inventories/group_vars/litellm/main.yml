@@ -40,5 +40,12 @@ litellm_max_retries: 3
 # This will be loaded from vault.yml
 litellm_master_key: "{{ vault_litellm_master_key }}"
 
+# Database configuration for virtual key management
+litellm_db_host: "hx-postgres-server.dev-test.hana-x.ai"
+litellm_db_port: 5432
+litellm_db_name: "litellm"
+litellm_db_user: "litellm_app"
+litellm_db_password: "{{ vault_litellm_db_password }}"
+
 # Python version override (system has 3.12)
 litellm_python_version: "3.12"

@@ -1,98 +1,57 @@
 ---
-# Systemd service configuration for LiteLLM
-
-- name: Deploy systemd service unit
-  ansible.builtin.copy:
-    dest: "/etc/systemd/system/{{ litellm_service_name }}.service"
+- name: Install systemd unit
+  copy:
+    dest: /etc/systemd/system/litellm.service
     mode: '0644'
-    owner: root
-    group: root
     content: |
       [Unit]
       Description=LiteLLM OpenAI-compatible proxy
-      Documentation=https://docs.litellm.ai/
       After=network-online.target
       Wants=network-online.target
 
       [Service]
       Type=simple
-      User={{ litellm_user }}
-      Group={{ litellm_group }}
-      WorkingDirectory={{ litellm_venv_path }}
-      
-      # Environment
-      EnvironmentFile={{ litellm_config_dir }}/litellm.env
-      Environment="PATH={{ litellm_venv_path }}/bin:/usr/local/bin:/usr/bin:/bin"
-      
-      # Start command
-      ExecStart={{ litellm_venv_path }}/bin/litellm --config {{ litellm_config_dir }}/config.yaml --host ${LITELLM_HOST} --port ${LITELLM_PORT}
-      
-      # Restart configuration
-      Restart={{ litellm_service_restart_policy }}
-      RestartSec={{ litellm_service_restart_sec }}
-      
-      # Security hardening
-      {% for key, value in litellm_service_hardening.items() %}
-      {{ key }}={{ value }}
-      {% endfor %}
-      
-      # Additional hardening
-      ReadWritePaths={{ litellm_config_dir }} {{ litellm_log_dir }}
-      CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_NET_ADMIN CAP_SYS_PTRACE
-      SystemCallFilter=@system-service
-      SystemCallErrorNumber=EPERM
-      
-      # Resource limits
-      LimitNOFILE=65536
-      LimitNPROC=4096
-      
-      # Logging
-      StandardOutput=journal
-      StandardError=journal
-      SyslogIdentifier={{ litellm_service_name }}
+      User=litellm
+      Group=litellm
+      EnvironmentFile=/etc/litellm/litellm.env
+      Environment="XDG_CACHE_HOME=/opt/litellm/.cache"
+      Environment="PATH=/opt/litellm/bin:/usr/bin:/bin"
+      WorkingDirectory=/opt/litellm
+      ExecStart=/opt/litellm/bin/litellm --config /etc/litellm/config.yaml --host ${LITELLM_HOST} --port ${LITELLM_PORT}
+      TimeoutStartSec=300
+      Restart=always
+      RestartSec=5
+      # Hardening
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
 
       [Install]
       WantedBy=multi-user.target
-  become: yes
-  register: service_unit
-  notify:
-    - reload systemd
-    - restart litellm
+  register: unit
+  notify: Restart litellm
 
-- name: Create systemd override directory
-  ansible.builtin.file:
-    path: "/etc/systemd/system/{{ litellm_service_name }}.service.d"
+- name: Create systemd override directory for litellm
+  file:
+    path: /etc/systemd/system/litellm.service.d
     state: directory
-    owner: root
-    group: root
     mode: '0755'
-  become: yes
 
-- name: Deploy systemd environment override (optional)
-  ansible.builtin.copy:
-    dest: "/etc/systemd/system/{{ litellm_service_name }}.service.d/override.conf"
-    content: |
-      # Override file for {{ litellm_service_name }} service
-      # Add any site-specific overrides here
-      [Service]
-      # Example: TimeoutStartSec=300
-    owner: root
-    group: root
+- name: Create a systemd override to inject the database URL
+  copy:
+    dest: /etc/systemd/system/litellm.service.d/override.conf
     mode: '0644'
-  become: yes
+    content: |
+      [Service]
+      Environment="DATABASE_URL=postgresql://{{ litellm_db_user }}:{{ litellm_db_password }}@{{ litellm_db_host }}:5432/{{ litellm_db_name }}"
+  notify: Restart litellm
+  no_log: true
 
-- name: Validate systemd service file
-  ansible.builtin.command:
-    cmd: "systemd-analyze verify {{ litellm_service_name }}.service"
-  register: service_verify
-  changed_when: false
-  failed_when: >
-    service_verify.rc != 0 or
-    'Failed to load' in (service_verify.stderr | default(''))
-  become: yes
+- name: Enable service
+  systemd:
+    name: litellm
+    enabled: yes
 
-- name: Reload systemd daemon if service unit changed
-  ansible.builtin.systemd:
-    daemon_reload: yes
-  when: service_unit.changed
-  become: yes
+- name: Flush handlers to apply restart now
+  meta: flush_handlers
