@@ -1,0 +1,29 @@
+[Unit]
+Description=HX Infrastructure Prometheus Server
+Documentation=https://prometheus.io/docs/introduction/overview/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/bin/prometheus \
+  --config.file={{ hx_metrics_prometheus_conf_dir }}/prometheus.yml \
+  --storage.tsdb.path={{ hx_metrics_prometheus_data_dir }} \
+  --web.console.templates=/etc/prometheus/consoles \
+  --web.console.libraries=/etc/prometheus/console_libraries \
+  --web.listen-address={{ hx_metrics_web_listen_address }} \
+  --web.external-url={{ hx_metrics_web_external_url }} \
+  --storage.tsdb.retention.time={{ hx_metrics_retention_time }} \
+  --storage.tsdb.retention.size={{ hx_metrics_retention_size }} \
+  --web.enable-lifecycle
+
+SyslogIdentifier=prometheus
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

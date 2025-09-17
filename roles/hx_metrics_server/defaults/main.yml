@@ -1,0 +1,65 @@
+---
+# HX Metrics Server Role Defaults
+# Following HX Infrastructure standards with hx_ prefixing
+
+# Package configuration
+hx_metrics_prometheus_pkg: prometheus
+hx_metrics_blackbox_pkg: prometheus-blackbox-exporter
+hx_metrics_node_exporter_pkg: prometheus-node-exporter
+
+# Directory configuration
+hx_metrics_prometheus_conf_dir: /etc/prometheus
+hx_metrics_prometheus_data_dir: /var/lib/prometheus
+hx_metrics_blackbox_conf_dir: /etc/prometheus
+hx_metrics_backup_dir: /var/backups/hx/metrics
+
+# Service configuration
+hx_metrics_prometheus_port: 9090
+hx_metrics_blackbox_port: 9115
+hx_metrics_node_exporter_port: 9100
+
+# Global Prometheus configuration
+hx_metrics_prometheus_global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: "hx-infrastructure"
+    environment: "{{ ansible_environment | default('dev-test') }}"
+
+# Blackbox exporter targets for health monitoring
+hx_metrics_blackbox_http_targets:
+  - https://hx-webui-server.dev-test.hana-x.ai/health
+  - https://hx-vectordb-server.dev-test.hana-x.ai:6333/metrics
+  - https://hx-api-server.dev-test.hana-x.ai:4000/health
+
+# Service discovery targets
+hx_metrics_service_discovery:
+  - job_name: 'hx-infrastructure-services'
+    static_configs:
+      - targets:
+        - 'hx-api-server.dev-test.hana-x.ai:4000'
+        - 'hx-vectordb-server.dev-test.hana-x.ai:6333'
+        - 'hx-postgres-server.dev-test.hana-x.ai:5432'
+
+# Feature toggles
+hx_metrics_enable_node_exporter: true
+hx_metrics_enable_blackbox_monitoring: true
+hx_metrics_enable_service_discovery: true
+
+# Retention and storage
+hx_metrics_retention_time: "30d"
+hx_metrics_retention_size: "10GB"
+
+# Security configuration
+hx_metrics_web_listen_address: "0.0.0.0:{{ hx_metrics_prometheus_port }}"
+hx_metrics_web_external_url: "http://hx-metrics-server.dev-test.hana-x.ai:{{ hx_metrics_prometheus_port }}"
+
+# Health check configuration
+hx_metrics_health_check_timeout: 30
+hx_metrics_health_check_retries: 5
+hx_metrics_health_check_delay: 3
+
+# Backup configuration
+hx_metrics_backup_enabled: true
+hx_metrics_backup_retention_days: 7
+hx_metrics_backup_ts: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"

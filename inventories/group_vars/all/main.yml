@@ -62,3 +62,31 @@ webui_bind: "0.0.0.0:8080"
 webui_allowed_origins: "http://hx-webui-server.dev-test.hana-x.ai"
 webui_auth_enabled: false
 webui_admin_email: "admin@dev-test.hana-x.ai"
+
+# --- HX Metrics Server Configuration ---
+hx_metrics_environment: "{{ ansible_environment | default('dev-test') }}"
+hx_metrics_domain: "{{ domain_name }}"
+
+# Metrics server specific targets for blackbox monitoring
+hx_metrics_monitoring_targets:
+  - name: "WebUI Health Check"
+    url: "https://hx-webui-server.{{ domain_name }}/health"
+    expected_status: 200
+  - name: "VectorDB Metrics"
+    url: "https://hx-vectordb-server.{{ domain_name }}:6333/metrics"
+    expected_status: 200
+  - name: "API Server Health"
+    url: "https://hx-api-server.{{ domain_name }}:4000/health"
+    expected_status: 200
+
+# Service discovery for HX Infrastructure
+hx_metrics_infrastructure_services:
+  - service: "hx-api-server"
+    port: 4000
+    metrics_path: "/metrics"
+  - service: "hx-vectordb-server"
+    port: 6333
+    metrics_path: "/metrics"
+  - service: "hx-postgres-server"
+    port: 5432
+    metrics_path: "/metrics"

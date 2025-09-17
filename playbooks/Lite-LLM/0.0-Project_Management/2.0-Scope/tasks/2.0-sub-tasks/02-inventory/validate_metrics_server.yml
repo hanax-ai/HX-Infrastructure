@@ -1,0 +1,170 @@
+---
+# HX Metrics Server Variable Validation
+# Validates all metrics server configuration variables
+
+- name: "Validate HX Metrics Server Variables"
+  hosts: localhost
+  gather_facts: no
+  vars:
+    ansible_base_dir: "{{ playbook_dir }}/../../../.."
+    metrics_required_vars:
+      # Package configuration
+      - name: hx_metrics_prometheus_pkg
+        type: string
+        location: roles/hx_metrics_server/defaults/main.yml
+      - name: hx_metrics_blackbox_pkg
+        type: string
+        location: roles/hx_metrics_server/defaults/main.yml
+      
+      # Port configuration
+      - name: hx_metrics_prometheus_port
+        type: integer
+        min: 1024
+        max: 65535
+        location: roles/hx_metrics_server/defaults/main.yml
+      - name: hx_metrics_blackbox_port
+        type: integer
+        min: 1024
+        max: 65535
+        location: roles/hx_metrics_server/defaults/main.yml
+      
+      # Directory configuration
+      - name: hx_metrics_prometheus_conf_dir
+        type: string
+        pattern: '^/[a-zA-Z0-9/_-]+$'
+        location: roles/hx_metrics_server/defaults/main.yml
+      - name: hx_metrics_prometheus_data_dir
+        type: string
+        pattern: '^/[a-zA-Z0-9/_-]+$'
+        location: roles/hx_metrics_server/defaults/main.yml
+      
+      # Feature toggles
+      - name: hx_metrics_enable_node_exporter
+        type: boolean
+        location: roles/hx_metrics_server/defaults/main.yml
+      - name: hx_metrics_enable_blackbox_monitoring
+        type: boolean
+        location: roles/hx_metrics_server/defaults/main.yml
+      - name: hx_metrics_enable_service_discovery
+        type: boolean
+        location: roles/hx_metrics_server/defaults/main.yml
+      
+      # Monitoring targets
+      - name: hx_metrics_blackbox_http_targets
+        type: list
+        min_items: 1
+        location: group_vars/metrics/main.yml
+      
+      # Global configuration
+      - name: hx_metrics_prometheus_global
+        type: dict
+        required_keys: ['scrape_interval', 'evaluation_interval']
+        location: group_vars/metrics/main.yml
+      
+      # Retention settings
+      - name: hx_metrics_retention_time
+        type: string
+        pattern: '^[0-9]+[dwmy]$'
+        location: roles/hx_metrics_server/defaults/main.yml
+      - name: hx_metrics_retention_size
+        type: string
+        pattern: '^[0-9]+[KMGT]B$'
+        location: roles/hx_metrics_server/defaults/main.yml
+
+  tasks:
+    - name: Load role defaults
+      include_vars:
+        file: "{{ ansible_base_dir }}/roles/hx_metrics_server/defaults/main.yml"
+        name: metrics_defaults
+      register: metrics_defaults_loaded
+    
+    - name: Load metrics group variables
+      include_vars:
+        file: "{{ ansible_base_dir }}/inventories/group_vars/metrics/main.yml"
+        name: metrics_group_vars
+      register: metrics_group_loaded
+      ignore_errors: yes
+    
+    - name: Combine all metrics variables
+      set_fact:
+        all_metrics_vars: "{{ metrics_defaults | combine(metrics_group_vars | default({})) }}"
+    
+    - name: Initialize metrics validation results
+      set_fact:
+        metrics_validation_results: []
+        metrics_validation_passed: true
+    
+    - name: Validate metrics server variables
+      include_tasks: validation_tasks/validate_metrics_var.yml
+      vars:
+        var_config: "{{ item }}"
+        source_vars: "{{ all_metrics_vars }}"
+      loop: "{{ metrics_required_vars }}"
+    
+    - name: Create metrics validation report
+      copy:
+        content: |
+          HX Metrics Server Variable Validation Report
+          ==========================================
+          Generated: {{ ansible_date_time.iso8601 }}
+          
+          Overall Status: {{ 'PASSED' if metrics_validation_passed else 'FAILED' }}
+          
+          Variable Validation Results
+          ---------------------------
+          {% for result in metrics_validation_results %}
+          {{ result.name }}:
+            Location: {{ result.location }}
+            Found: {{ 'YES' if result.found else 'NO' }}
+            Valid: {{ 'YES' if result.valid else 'NO' }}
+            {% if result.found %}Value: {{ result.value | to_json }}{% endif %}
+            Status: {{ result.message }}
+          
+          {% endfor %}
+          
+          Service Configuration
+          --------------------
+          {% if 'hx_metrics_service_discovery' in all_metrics_vars %}
+          Service Discovery Jobs: {{ all_metrics_vars.hx_metrics_service_discovery | length }}
+          {% for job in all_metrics_vars.hx_metrics_service_discovery %}
+          - Job: {{ job.job_name }}
+            Targets: {{ job.static_configs[0].targets | length }}
+          {% endfor %}
+          {% endif %}
+          
+          Monitoring Targets
+          -----------------
+          {% if 'hx_metrics_blackbox_http_targets' in all_metrics_vars %}
+          HTTP Targets: {{ all_metrics_vars.hx_metrics_blackbox_http_targets | length }}
+          {% for target in all_metrics_vars.hx_metrics_blackbox_http_targets %}
+          - {{ target }}
+          {% endfor %}
+          {% endif %}
+          
+          Next Steps
+          ----------
+          {% if metrics_validation_passed %}
+          ✓ All metrics server variables are properly configured
+          → Ready for deployment
+          {% else %}
+          ✗ Metrics server validation failed. Fix the following:
+          {% for result in metrics_validation_results | selectattr('valid', 'false') %}
+            - {{ result.name }}: {{ result.message }}
+          {% endfor %}
+          {% endif %}
+        dest: "/tmp/hx_metrics_validation_{{ ansible_date_time.epoch }}.txt"
+    
+    - name: Display metrics validation summary
+      debug:
+        msg:
+          - "HX Metrics Server Validation Summary"
+          - "===================================="
+          - "Variables validated: {{ metrics_validation_results | selectattr('valid', 'true') | list | length }}/{{ metrics_validation_results | length }}"
+          - "Overall: {{ 'PASSED' if metrics_validation_passed else 'FAILED' }}"
+          - ""
+          - "Report saved to: /tmp/hx_metrics_validation_{{ ansible_date_time.epoch }}.txt"
+    
+    - name: Fail if metrics validation failed
+      fail:
+        msg: "Metrics server validation failed. Check the report for details."
+      when: not metrics_validation_passed

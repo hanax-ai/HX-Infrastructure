@@ -1,0 +1,102 @@
+---
+# HX Metrics Server Installation and Configuration
+# Follows HX Infrastructure standards for idempotent operations
+
+- name: Ensure required packages are installed
+  ansible.builtin.apt:
+    name:
+      - "{{ hx_metrics_prometheus_pkg }}"
+      - "{{ hx_metrics_blackbox_pkg }}"
+      - "{{ hx_metrics_node_exporter_pkg if hx_metrics_enable_node_exporter else omit }}"
+      - curl
+      - ca-certificates
+    state: present
+    update_cache: yes
+  when: ansible_os_family == 'Debian'
+
+- name: Ensure Prometheus directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+  loop:
+    - "{{ hx_metrics_prometheus_conf_dir }}"
+    - "{{ hx_metrics_prometheus_data_dir }}"
+    - "{{ hx_metrics_backup_dir }}"
+
+- name: Render Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ hx_metrics_prometheus_conf_dir }}/prometheus.yml"
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+    backup: yes
+  notify: 
+    - restart prometheus
+    - validate prometheus config
+
+- name: Render Blackbox Exporter configuration
+  ansible.builtin.template:
+    src: blackbox.yml.j2
+    dest: "{{ hx_metrics_blackbox_conf_dir }}/blackbox.yml"
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+    backup: yes
+  notify: restart blackbox-exporter
+  when: hx_metrics_enable_blackbox_monitoring
+
+- name: Configure Prometheus service
+  ansible.builtin.template:
+    src: prometheus.service.j2
+    dest: /etc/systemd/system/prometheus.service
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart prometheus
+
+- name: Enable and start services
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - prometheus
+    - "{{ 'prometheus-blackbox-exporter' if hx_metrics_enable_blackbox_monitoring else omit }}"
+    - "{{ 'prometheus-node-exporter' if hx_metrics_enable_node_exporter else omit }}"
+
+- name: Wait for Prometheus to be ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ hx_metrics_prometheus_port }}/-/ready"
+    status_code: 200
+    return_content: false
+  register: hx_metrics_prometheus_ready
+  retries: "{{ hx_metrics_health_check_retries }}"
+  delay: "{{ hx_metrics_health_check_delay }}"
+  until: hx_metrics_prometheus_ready.status == 200
+
+- name: Verify Blackbox Exporter metrics endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ hx_metrics_blackbox_port }}/metrics"
+    status_code: 200
+    return_content: false
+  when: hx_metrics_enable_blackbox_monitoring
+
+- name: Create metrics backup script
+  ansible.builtin.template:
+    src: backup_metrics.sh.j2
+    dest: /usr/local/bin/hx_backup_metrics.sh
+    mode: "0755"
+  when: hx_metrics_backup_enabled
+
+- name: Schedule metrics backup
+  ansible.builtin.cron:
+    name: "HX Metrics Backup"
+    minute: "0"
+    hour: "2"
+    job: "/usr/local/bin/hx_backup_metrics.sh"
+    user: root
+  when: hx_metrics_backup_enabled

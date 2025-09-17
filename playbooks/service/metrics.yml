@@ -1,0 +1,64 @@
+---
+# HX Metrics Server Deployment Playbook
+# Follows HX Infrastructure standards for service deployment
+
+- name: "[Metrics] Preflight DNS Verification"
+  hosts: hx-dc-server.dev-test.hana-x.ai
+  gather_facts: false
+  tasks:
+    - name: Resolve metrics server A record
+      ansible.builtin.command: host hx-metrics-server.dev-test.hana-x.ai
+      register: metrics_arec
+      changed_when: false
+
+    - name: Assert metrics A record present
+      ansible.builtin.assert:
+        that: "'has address' in metrics_arec.stdout"
+        fail_msg: "Missing/invalid A record for hx-metrics-server.dev-test.hana-x.ai"
+
+    - name: Resolve PTR for metrics server
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ip="$(echo {{ metrics_arec.stdout | quote }} | awk '/has address/{print $4; exit}')"
+        host "$ip"
+      register: metrics_ptr
+      changed_when: false
+
+    - name: Assert PTR points to metrics FQDN
+      ansible.builtin.assert:
+        that: "'hx-metrics-server.dev-test.hana-x.ai' in metrics_ptr.stdout"
+        fail_msg: "PTR does not map back to hx-metrics-server.dev-test.hana-x.ai"
+
+- name: "[Metrics] Install and Configure HX Metrics Server"
+  hosts: metrics
+  become: true
+  vars:
+    # Override defaults for deployment
+    hx_metrics_environment: "{{ ansible_environment | default('dev-test') }}"
+  
+  pre_tasks:
+    - name: Validate metrics server configuration
+      include_tasks: ../Lite-LLM/0.0-Project_Management/2.0-Scope/tasks/2.0-sub-tasks/02-inventory/validate_metrics_server.yml
+      delegate_to: localhost
+      run_once: true
+
+  roles:
+    - role: hx_ca_trust
+      when: hx_metrics_enable_tls | default(false)
+    - role: hx_metrics_server
+
+  post_tasks:
+    - name: Verify metrics server health
+      ansible.builtin.uri:
+        url: "http://{{ inventory_hostname }}:{{ hx_metrics_prometheus_port }}/-/ready"
+        status_code: 200
+        return_content: false
+      delegate_to: localhost
+
+    - name: Display metrics server information
+      debug:
+        msg:
+          - "HX Metrics Server deployed successfully!"
+          - "Prometheus UI: http://{{ inventory_hostname }}:{{ hx_metrics_prometheus_port }}"
+          - "Blackbox Exporter: http://{{ inventory_hostname }}:{{ hx_metrics_blackbox_port }}/metrics"
+          - "Health Check: http://{{ inventory_hostname }}:{{ hx_metrics_prometheus_port }}/-/ready"
