@@ -1,0 +1,21 @@
+---
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: restart prometheus
+  ansible.builtin.service:
+    name: prometheus
+    state: restarted
+
+- name: restart blackbox-exporter
+  ansible.builtin.service:
+    name: prometheus-blackbox-exporter
+    state: restarted
+
+- name: validate prometheus config
+  ansible.builtin.command:
+    cmd: promtool check config {{ hx_metrics_prometheus_conf_dir }}/prometheus.yml
+  register: hx_metrics_config_check
+  failed_when: hx_metrics_config_check.rc != 0
+  changed_when: false

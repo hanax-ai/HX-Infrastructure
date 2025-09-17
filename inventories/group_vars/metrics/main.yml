@@ -1,0 +1,47 @@
+---
+# HX Metrics Server Group Variables
+# Environment-specific configuration for metrics infrastructure
+
+# Override defaults for metrics group
+hx_metrics_prometheus_global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: "hx-infrastructure"
+    environment: "dev-test"
+    datacenter: "hana-x-primary"
+
+# Environment-specific blackbox targets
+hx_metrics_blackbox_http_targets:
+  - "https://hx-webui-server.dev-test.hana-x.ai/health"
+  - "https://hx-vectordb-server.dev-test.hana-x.ai:6333/metrics"
+  - "https://hx-api-server.dev-test.hana-x.ai:4000/health"
+  - "https://hx-postgres-server.dev-test.hana-x.ai:5432"
+
+# Service discovery configuration
+hx_metrics_service_discovery:
+  - job_name: 'hx-infrastructure-api'
+    static_configs:
+      - targets:
+        - 'hx-api-server.dev-test.hana-x.ai:4000'
+        labels:
+          service: 'api-gateway'
+          tier: 'frontend'
+  - job_name: 'hx-infrastructure-data'
+    static_configs:
+      - targets:
+        - 'hx-vectordb-server.dev-test.hana-x.ai:6333'
+        - 'hx-postgres-server.dev-test.hana-x.ai:5432'
+        labels:
+          service: 'data-layer'
+          tier: 'backend'
+
+# Feature toggles for dev-test environment
+hx_metrics_enable_node_exporter: true
+hx_metrics_enable_blackbox_monitoring: true
+hx_metrics_enable_service_discovery: true
+hx_metrics_backup_enabled: true
+
+# Environment-specific retention
+hx_metrics_retention_time: "15d"
+hx_metrics_retention_size: "5GB"

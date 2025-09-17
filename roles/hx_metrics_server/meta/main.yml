@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  author: HX Infrastructure Team
+  description: HX Infrastructure Metrics Server with Prometheus and Blackbox Exporter
+  company: HANA-X AI
+  license: MIT
+  min_ansible_version: 2.9
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+  galaxy_tags:
+    - monitoring
+    - prometheus
+    - metrics
+    - hx-infrastructure
+
+dependencies:
+  - role: hx_ca_trust
+    when: hx_metrics_enable_tls | default(false)

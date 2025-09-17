@@ -1,0 +1,62 @@
+---
+# Validate a single metrics server variable
+- name: "Validate metrics variable: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: "{{ var_config.name in source_vars }}"
+      value: "{{ source_vars[var_config.name] | default(None) }}"
+      valid: false
+      message: "Variable not found"
+  when: var_config.name not in source_vars
+
+- name: "Validate metrics variable type and values for: {{ var_config.name }}"
+  set_fact:
+    validation_item:
+      name: "{{ var_config.name }}"
+      location: "{{ var_config.location }}"
+      found: true
+      value: "{{ source_vars[var_config.name] }}"
+      valid: >-
+        {{
+          (var_config.type == 'string' and source_vars[var_config.name] is string and
+           (var_config.pattern is not defined or source_vars[var_config.name] | regex_search(var_config.pattern))) or
+          (var_config.type == 'integer' and source_vars[var_config.name] is number and
+           source_vars[var_config.name] >= (var_config.min | default(0)) and
+           source_vars[var_config.name] <= (var_config.max | default(999999))) or
+          (var_config.type == 'boolean' and source_vars[var_config.name] is boolean) or
+          (var_config.type == 'list' and source_vars[var_config.name] is sequence and
+           source_vars[var_config.name] | length >= (var_config.min_items | default(0))) or
+          (var_config.type == 'dict' and source_vars[var_config.name] is mapping and
+           (var_config.required_keys is not defined or
+            (var_config.required_keys | difference(source_vars[var_config.name].keys())) | length == 0))
+        }}
+      message: >-
+        {% if var_config.type == 'string' and source_vars[var_config.name] is not string %}
+        Invalid type. Expected string, got {{ source_vars[var_config.name] | type_debug }}
+        {% elif var_config.type == 'string' and var_config.pattern is defined and not (source_vars[var_config.name] | regex_search(var_config.pattern)) %}
+        Invalid format. Must match pattern: {{ var_config.pattern }}
+        {% elif var_config.type == 'integer' and source_vars[var_config.name] is not number %}
+        Invalid type. Expected integer, got {{ source_vars[var_config.name] | type_debug }}
+        {% elif var_config.type == 'integer' and (source_vars[var_config.name] < (var_config.min | default(0)) or source_vars[var_config.name] > (var_config.max | default(999999))) %}
+        Invalid range. Must be between {{ var_config.min | default(0) }} and {{ var_config.max | default(999999) }}
+        {% elif var_config.type == 'boolean' and source_vars[var_config.name] is not boolean %}
+        Invalid type. Expected boolean, got {{ source_vars[var_config.name] | type_debug }}
+        {% elif var_config.type == 'list' and source_vars[var_config.name] is not sequence %}
+        Invalid type. Expected list, got {{ source_vars[var_config.name] | type_debug }}
+        {% elif var_config.type == 'list' and source_vars[var_config.name] | length < (var_config.min_items | default(0)) %}
+        Invalid size. Must have at least {{ var_config.min_items | default(0) }} items
+        {% elif var_config.type == 'dict' and source_vars[var_config.name] is not mapping %}
+        Invalid type. Expected dictionary, got {{ source_vars[var_config.name] | type_debug }}
+        {% elif var_config.type == 'dict' and var_config.required_keys is defined and (var_config.required_keys | difference(source_vars[var_config.name].keys())) | length > 0 %}
+        Missing required keys: {{ var_config.required_keys | difference(source_vars[var_config.name].keys()) | join(', ') }}
+        {% else %}
+        OK
+        {% endif %}
+  when: var_config.name in source_vars
+
+- name: Add metrics validation result
+  set_fact:
+    metrics_validation_results: "{{ metrics_validation_results + [validation_item] }}"
+    metrics_validation_passed: "{{ metrics_validation_passed and validation_item.valid }}"
